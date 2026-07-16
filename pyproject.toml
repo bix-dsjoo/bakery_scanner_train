@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bakery-scanner-train"
+version = "0.1.0"
+description = "Dataset validation foundation for the bakery scanner project"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = ["Pillow>=12,<13"]
+
+[project.optional-dependencies]
+test = ["pytest>=9,<10"]
+
+[project.scripts]
+bakery-audit = "bakery_scanner.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+addopts = "--strict-markers"
+pythonpath = ["src"]
+testpaths = ["tests"]

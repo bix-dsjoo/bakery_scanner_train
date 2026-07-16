@@ -2,7 +2,7 @@
 
 고정 카메라로 촬영한 트레이 이미지에서 여러 빵의 위치와 종류를 식별하고, 신규 빵 클래스를 추가했을 때 기존 성능이 얼마나 유지되는지 검증하는 프로젝트입니다.
 
-현재 저장소에는 데이터셋과 설계 문서가 있으며 학습·추론 코드는 아직 구현되지 않았습니다.
+현재 저장소에는 데이터셋 무결성 검사, COCO 검증, 학습 경로 안전장치와 scene 단위 split을 제공하는 Python 기반이 구현되어 있습니다. 모델 학습·추론 코드는 아직 구현되지 않았습니다.
 
 ## 목표
 
@@ -123,11 +123,69 @@ datasets/                         원본 및 프로젝트 데이터
   class_registry.json             클래스 ID와 모델 인덱스 매핑
   derived/synthetic/              재생성 가능한 합성 장면
   collected/scene_train/          추가 촬영한 실제 학습 장면
+src/bakery_scanner/               데이터 검증, 안전장치, split과 audit CLI
+tests/                            pytest 자동 테스트
 docs/superpowers/specs/           승인된 설계 문서
 docs/superpowers/plans/           구현 계획
+pyproject.toml                    Python 패키지와 실행 명령 정의
 ```
 
 `derived/`와 `collected/` 경로는 해당 데이터가 생성되거나 수집될 때 추가합니다.
+
+## Python 환경 준비
+
+Python 3.11 이상에서 프로젝트 루트 기준으로 editable 설치합니다.
+
+```powershell
+python -m pip install -e ".[test]"
+```
+
+Pillow는 COCO에 기록된 이미지 크기와 실제 디코딩 크기가 같은지 확인하는 데 사용합니다. 모델 학습 라이브러리는 아직 포함하지 않습니다.
+
+## 데이터 audit
+
+전체 레지스트리, 클래스 폴더, 단일 객체 이미지 수와 세 COCO split을 읽기 전용으로 검사합니다.
+
+```powershell
+bakery-audit --dataset-root datasets
+```
+
+설치된 console script 대신 Python module entry point를 사용할 수도 있습니다.
+
+```powershell
+python -m bakery_scanner --dataset-root datasets
+```
+
+자동 처리용 JSON 출력과 제안 train-side split의 seed 및 validation 비율을 지정할 수 있습니다.
+
+```powershell
+bakery-audit --dataset-root datasets --json --seed 42 --validation-fraction 0.2
+```
+
+Audit는 다음 조건을 하나라도 발견하면 exit code `1`로 실패합니다.
+
+- 중복 ID, 0부터 19까지 연속적이지 않은 `model_index`, Base 15개/Incremental 5개 구성 불일치
+- 레지스트리 phase와 `bread_*` 클래스 폴더 불일치
+- COCO image/category 참조 오류, 디렉터리의 누락·미등록 이미지, 실제 이미지 크기 불일치
+- 0 이하 면적, 유한하지 않은 값 또는 이미지 경계를 벗어난 bbox
+- 잘못되었거나 불완전한 `scene_e_*`, `scene_m_*`, `scene_h_*` 그룹
+
+Audit는 무결성 확인을 위해 평가 전용 split도 읽지만, 이 동작은 학습 사용 권한을 부여하지 않습니다. 향후 학습 entry point는 `bakery_scanner.safety.assert_training_paths_safe`를 호출해 `datasets/base/test`와 `datasets/incremental/test` 및 그 하위 경로를 즉시 거부해야 합니다.
+
+기본 설정(`seed=42`, `validation_fraction=0.2`)으로 현재 `datasets/base/val`에 제안되는 scene split은 다음과 같습니다. 이 명령은 split 파일을 쓰거나 원본 데이터를 변경하지 않습니다.
+
+- train scene ID: `0503`, `0510`
+- validation scene ID: `0509`
+
+## 자동 테스트
+
+전체 테스트를 실행합니다.
+
+```powershell
+python -m pytest -q
+```
+
+테스트는 임시 데이터만 생성하며 기존 `datasets` 원본을 변경하지 않습니다.
 
 ## 설계 문서
 
