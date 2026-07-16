@@ -5,3 +5,7 @@ __pycache__/
 build/
 dist/
 .venv/
+
+# Reproducible local dataset runs (manifests and images are generated together).
+datasets/derived/synthetic/
+datasets/derived/detector/

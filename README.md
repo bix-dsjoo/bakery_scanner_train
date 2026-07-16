@@ -123,9 +123,10 @@ datasets/                         원본 및 프로젝트 데이터
   incremental/                    Incremental 단일 객체와 test
   class_registry.json             클래스 ID와 모델 인덱스 매핑
   derived/synthetic/              재생성 가능한 합성 장면
+  derived/detector/               class-agnostic detector train/validation COCO
   collected/backgrounds/          합성 장면용 실제 빈 트레이 배경
   collected/scene_train/          추가 촬영한 실제 학습 장면
-src/bakery_scanner/               데이터 검증, split, 합성 장면과 CLI
+src/bakery_scanner/               데이터 검증, split, 합성·detector 데이터와 CLI
 tests/                            pytest 자동 테스트
 docs/superpowers/specs/           승인된 설계 문서
 docs/superpowers/plans/           구현 계획
@@ -179,7 +180,57 @@ bakery-synthetic validate --dataset-root datasets --run-name base_seed42
 
 각 run의 `manifest.json`에는 manifest/generator/Pillow version, master seed, 전체 생성 설정과 장면 목록이 기록됩니다. 장면에는 파생 seed, 출력 파일·크기·SHA-256, 배경 경로가, 객체에는 원본 경로, COCO `category_id`, 위치·크기·회전·밝기·대비 변환과 `[x, y, width, height]` bbox가 포함됩니다. 모델 출력 순서인 `model_index`는 합성 annotation으로 사용하지 않습니다.
 
-현재 기반 구현은 흰색 또는 near-white 배경의 단일 객체 이미지를 전제로 alpha mask를 계산하고, 완전히 보이는 bbox를 위해 객체 간 겹침을 허용하지 않습니다. 실제 tray 배경 분리, 가림·밀집도 난이도, 색온도 변환과 COCO export는 후속 범위입니다.
+현재 합성기 구현은 흰색 또는 near-white 배경의 단일 객체 이미지를 전제로 alpha mask를 계산하고, 완전히 보이는 bbox를 위해 객체 간 겹침을 허용하지 않습니다. 실제 tray 배경 분리, 가림·밀집도 난이도와 색온도 변환은 후속 범위입니다. 합성 run 자체는 COCO를 쓰지 않으며, 다음 detector 데이터 조립 단계가 실제 장면과 함께 단일 `bread` COCO로 변환합니다.
+
+## Detector train/validation COCO 조립과 검증
+
+`bakery-detector-data`는 실제 train-side 장면인 `datasets/base/val/instances_val.json`과 이미 생성·검증된 합성 run 하나를 조립합니다. detector 학습이나 추론은 실행하지 않습니다. 먼저 위의 `bakery-synthetic validate`가 통과하는 합성 run이 있어야 합니다.
+
+다음 예시는 `base_seed42` 합성 run을 사용해 `datasets/derived/detector/base_seed42_detector/`를 생성합니다.
+
+```powershell
+bakery-detector-data generate `
+  --dataset-root datasets `
+  --synthetic-run base_seed42 `
+  --run-name base_seed42_detector `
+  --seed 42 `
+  --validation-fraction 0.2
+```
+
+설치된 console script 대신 module로도 같은 작업을 실행할 수 있습니다.
+
+```powershell
+python -m bakery_scanner.detector_cli generate --dataset-root datasets --synthetic-run base_seed42 --run-name base_seed42_detector --seed 42 --validation-fraction 0.2
+```
+
+완성된 run의 manifest, 입력 provenance, 입력·출력 SHA-256, 이미지 inventory, 두 COCO, bbox와 split 누수를 독립적으로 다시 검사합니다.
+
+```powershell
+bakery-detector-data validate `
+  --dataset-root datasets `
+  --run-name base_seed42_detector
+```
+
+출력 구조는 다음과 같습니다.
+
+```text
+datasets/derived/detector/base_seed42_detector/
+  manifest.json
+  train/
+    images/
+    instances.json
+  validation/
+    images/
+    instances.json
+```
+
+두 COCO의 category는 `{"id": 1, "name": "bread"}` 하나뿐입니다. 원본 COCO `category_id`는 sample별 `original_annotations`와 합성 객체 provenance에만 보존되며 `model_index`로 변환하거나 혼용하지 않습니다. annotation이 없는 정상 이미지도 빈 annotation 목록으로 유지됩니다.
+
+분할은 이미지별 독립 난수가 아니라 누수 자원의 연결 component 단위로 수행합니다. 실제 `scene_e/m/h`의 동일 scene ID, 합성 원본 객체의 정규화 경로와 SHA-256, 합성 배경의 정규화 경로와 SHA-256, 동일 이미지 SHA-256을 공유하는 장면은 반드시 같은 split으로 이동합니다. seed는 안전한 component 후보의 결정론적 순서에 사용되며, 요청한 validation 비율에 가장 가까운 비어 있지 않은 component 조합을 선택합니다. 모든 입력이 하나의 component로 연결되어 train/validation을 모두 만들 수 없으면 오류로 종료합니다.
+
+현재 split 최적화는 전체 이미지 수와 누수 안전성을 기준으로 하며 real/synthetic origin별 최소 수량은 보장하지 않습니다. 공유 provenance가 많은 합성 run은 하나의 큰 component가 될 수 있으므로, 학습 전에 manifest의 origin별 train/validation 분포를 확인해야 합니다.
+
+생성은 `datasets/derived/detector/` 아래 임시 staging run에서 전체 검증을 통과한 뒤 원자적으로 publish합니다. 기존 run은 `--overwrite` 없이는 거부하며, 교체 실패 시 기존 run을 복구합니다. test 경로, 잘못된 bbox, 누락·추가·변조 파일, source hash 변경과 split 누수는 모두 exit code `1` 오류입니다. 두 subcommand 모두 자동 처리용 `--json`을 지원합니다.
 
 ## 데이터 audit
 
