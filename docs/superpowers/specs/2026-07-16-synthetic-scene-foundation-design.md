@@ -46,4 +46,4 @@ Replay is the source of truth for image/bbox consistency: it reconstructs each s
 
 Pytest uses temporary registered cutouts and backgrounds. Tests are written and observed failing before implementation. They cover required manifest fields, category mapping, deterministic regeneration, bbox/pixel agreement, output confinement, test-path rejection, overwrite behavior, tampered images and bboxes, missing files, and both CLI subcommands.
 
-The README documents only commands implemented and exercised in this change. Real-data smoke verification uses registered non-test object images and a temporary plain background because the repository currently contains no empty tray background assets. No commit or push is performed.
+The README documents only commands implemented and exercised in this change. Real empty-tray background images are stored under `datasets/collected/backgrounds/` and can be passed directly to the generation CLI. Initial implementation smoke verification used a temporary plain background before those assets were added.
