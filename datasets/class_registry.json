@@ -1,0 +1,145 @@
+{
+  "version": 1,
+  "classes": [
+    {
+      "category_id": 2,
+      "model_index": 0,
+      "canonical_name": "Croffle",
+      "folder_name": "bread_02_croffle",
+      "phase": "base"
+    },
+    {
+      "category_id": 4,
+      "model_index": 1,
+      "canonical_name": "Scone",
+      "folder_name": "bread_04_scone",
+      "phase": "base"
+    },
+    {
+      "category_id": 5,
+      "model_index": 2,
+      "canonical_name": "Half-moon Croissant",
+      "folder_name": "bread_05_half_moon_croissant",
+      "phase": "base"
+    },
+    {
+      "category_id": 6,
+      "model_index": 3,
+      "canonical_name": "Croissant",
+      "folder_name": "bread_06_croissant",
+      "phase": "base"
+    },
+    {
+      "category_id": 7,
+      "model_index": 4,
+      "canonical_name": "Flower Bread",
+      "folder_name": "bread_07_flower_bread",
+      "phase": "base"
+    },
+    {
+      "category_id": 8,
+      "model_index": 5,
+      "canonical_name": "Almond Scone",
+      "folder_name": "bread_08_almond_scone",
+      "phase": "base"
+    },
+    {
+      "category_id": 9,
+      "model_index": 6,
+      "canonical_name": "Dinner Roll",
+      "folder_name": "bread_09_dinner_roll",
+      "phase": "base"
+    },
+    {
+      "category_id": 10,
+      "model_index": 7,
+      "canonical_name": "Sugar Donut",
+      "folder_name": "bread_10_sugar_donut",
+      "phase": "base"
+    },
+    {
+      "category_id": 11,
+      "model_index": 8,
+      "canonical_name": "Bagel",
+      "folder_name": "bread_11_bagel",
+      "phase": "base"
+    },
+    {
+      "category_id": 12,
+      "model_index": 9,
+      "canonical_name": "Egg Tart",
+      "folder_name": "bread_12_egg_tart",
+      "phase": "base"
+    },
+    {
+      "category_id": 13,
+      "model_index": 10,
+      "canonical_name": "Muffin",
+      "folder_name": "bread_13_muffin",
+      "phase": "base"
+    },
+    {
+      "category_id": 14,
+      "model_index": 11,
+      "canonical_name": "Burger",
+      "folder_name": "bread_14_burger",
+      "phase": "base"
+    },
+    {
+      "category_id": 15,
+      "model_index": 12,
+      "canonical_name": "Sandwich",
+      "folder_name": "bread_15_sandwich",
+      "phase": "base"
+    },
+    {
+      "category_id": 18,
+      "model_index": 13,
+      "canonical_name": "Mini Bread",
+      "folder_name": "bread_18_mini_bread",
+      "phase": "base"
+    },
+    {
+      "category_id": 19,
+      "model_index": 14,
+      "canonical_name": "Pastry Bread",
+      "folder_name": "bread_19_pastry_bread",
+      "phase": "base"
+    },
+    {
+      "category_id": 1,
+      "model_index": 15,
+      "canonical_name": "Walnut Donut",
+      "folder_name": "bread_01_walnut_donut",
+      "phase": "incremental"
+    },
+    {
+      "category_id": 3,
+      "model_index": 16,
+      "canonical_name": "Waffle",
+      "folder_name": "bread_03_waffle",
+      "phase": "incremental"
+    },
+    {
+      "category_id": 16,
+      "model_index": 17,
+      "canonical_name": "Grain Campagne",
+      "folder_name": "bread_16_grain_campagne",
+      "phase": "incremental"
+    },
+    {
+      "category_id": 17,
+      "model_index": 18,
+      "canonical_name": "Almond Campagne",
+      "folder_name": "bread_17_almond_campagne",
+      "phase": "incremental"
+    },
+    {
+      "category_id": 20,
+      "model_index": 19,
+      "canonical_name": "Plain Bread",
+      "folder_name": "bread_20_plain_bread",
+      "phase": "incremental"
+    }
+  ]
+}

@@ -1,0 +1,727 @@
+{
+  "images": [
+    {
+      "id": 1,
+      "file_name": "scene_e_0503.jpg",
+      "width": 3024,
+      "height": 4032
+    },
+    {
+      "id": 2,
+      "file_name": "scene_e_0509.jpg",
+      "width": 4284,
+      "height": 5712
+    },
+    {
+      "id": 3,
+      "file_name": "scene_e_0510.jpg",
+      "width": 4284,
+      "height": 5712
+    },
+    {
+      "id": 4,
+      "file_name": "scene_h_0503.jpg",
+      "width": 3024,
+      "height": 4032
+    },
+    {
+      "id": 5,
+      "file_name": "scene_h_0509.jpg",
+      "width": 4284,
+      "height": 5712
+    },
+    {
+      "id": 6,
+      "file_name": "scene_h_0510.jpg",
+      "width": 4284,
+      "height": 5712
+    },
+    {
+      "id": 7,
+      "file_name": "scene_m_0503.jpg",
+      "width": 3024,
+      "height": 4032
+    },
+    {
+      "id": 8,
+      "file_name": "scene_m_0509.jpg",
+      "width": 4284,
+      "height": 5712
+    },
+    {
+      "id": 9,
+      "file_name": "scene_m_0510.jpg",
+      "width": 4284,
+      "height": 5712
+    }
+  ],
+  "annotations": [
+    {
+      "id": 1,
+      "image_id": 1,
+      "category_id": 11,
+      "bbox": [
+        1149.01,
+        959.44,
+        713.45,
+        738.72
+      ],
+      "area": 527039.7840000001,
+      "iscrowd": 0
+    },
+    {
+      "id": 2,
+      "image_id": 1,
+      "category_id": 12,
+      "bbox": [
+        1916.97,
+        1003.72,
+        636.42,
+        643.32
+      ],
+      "area": 409421.7144,
+      "iscrowd": 0
+    },
+    {
+      "id": 3,
+      "image_id": 1,
+      "category_id": 13,
+      "bbox": [
+        283.0,
+        985.81,
+        805.16,
+        779.47
+      ],
+      "area": 627598.0652,
+      "iscrowd": 0
+    },
+    {
+      "id": 4,
+      "image_id": 1,
+      "category_id": 14,
+      "bbox": [
+        496.42105263157896,
+        2000.842105263158,
+        909.4736842105262,
+        894.3157894736842
+      ],
+      "area": 813356.6759002769,
+      "iscrowd": 0
+    },
+    {
+      "id": 5,
+      "image_id": 1,
+      "category_id": 15,
+      "bbox": [
+        1327.97,
+        1664.75,
+        1133.95,
+        1330.13
+      ],
+      "area": 1508300.9135000003,
+      "iscrowd": 0
+    },
+    {
+      "id": 6,
+      "image_id": 2,
+      "category_id": 2,
+      "bbox": [
+        2529.43,
+        1384.24,
+        875.41,
+        1556.28
+      ],
+      "area": 1362383.0747999998,
+      "iscrowd": 0
+    },
+    {
+      "id": 7,
+      "image_id": 2,
+      "category_id": 11,
+      "bbox": [
+        2477.35,
+        3235.66,
+        954.81,
+        976.02
+      ],
+      "area": 931913.6562,
+      "iscrowd": 0
+    },
+    {
+      "id": 8,
+      "image_id": 2,
+      "category_id": 12,
+      "bbox": [
+        913.34,
+        3363.63,
+        889.99,
+        862.58
+      ],
+      "area": 767687.5742,
+      "iscrowd": 0
+    },
+    {
+      "id": 9,
+      "image_id": 2,
+      "category_id": 13,
+      "bbox": [
+        947.46,
+        2116.8,
+        1061.43,
+        1048.89
+      ],
+      "area": 1113323.3127000001,
+      "iscrowd": 0
+    },
+    {
+      "id": 10,
+      "image_id": 2,
+      "category_id": 18,
+      "bbox": [
+        703.11,
+        1220.59,
+        1174.54,
+        787.77
+      ],
+      "area": 925267.3757999999,
+      "iscrowd": 0
+    },
+    {
+      "id": 11,
+      "image_id": 3,
+      "category_id": 4,
+      "bbox": [
+        2037.3,
+        3276.29,
+        1573.45,
+        986.98
+      ],
+      "area": 1552963.681,
+      "iscrowd": 0
+    },
+    {
+      "id": 12,
+      "image_id": 3,
+      "category_id": 5,
+      "bbox": [
+        772.02,
+        2299.85,
+        1231.22,
+        1224.86
+      ],
+      "area": 1508072.1291999999,
+      "iscrowd": 0
+    },
+    {
+      "id": 13,
+      "image_id": 3,
+      "category_id": 6,
+      "bbox": [
+        2394.85,
+        1405.87,
+        963.31,
+        1732.18
+      ],
+      "area": 1668626.3158,
+      "iscrowd": 0
+    },
+    {
+      "id": 14,
+      "image_id": 3,
+      "category_id": 8,
+      "bbox": [
+        815.08,
+        1234.82,
+        1027.73,
+        976.7
+      ],
+      "area": 1003783.8910000001,
+      "iscrowd": 0
+    },
+    {
+      "id": 15,
+      "image_id": 3,
+      "category_id": 9,
+      "bbox": [
+        971.96,
+        3628.25,
+        790.59,
+        745.34
+      ],
+      "area": 589258.3506,
+      "iscrowd": 0
+    },
+    {
+      "id": 16,
+      "image_id": 4,
+      "category_id": 11,
+      "bbox": [
+        1573.02,
+        2270.08,
+        712.49,
+        733.73
+      ],
+      "area": 522775.28770000004,
+      "iscrowd": 0
+    },
+    {
+      "id": 17,
+      "image_id": 4,
+      "category_id": 12,
+      "bbox": [
+        1907.31,
+        1784.76,
+        649.26,
+        609.88
+      ],
+      "area": 395970.6888,
+      "iscrowd": 0
+    },
+    {
+      "id": 18,
+      "image_id": 4,
+      "category_id": 13,
+      "bbox": [
+        511.44,
+        1468.66,
+        743.68,
+        711.52
+      ],
+      "area": 529143.1936,
+      "iscrowd": 0
+    },
+    {
+      "id": 19,
+      "image_id": 4,
+      "category_id": 14,
+      "bbox": [
+        1044.96,
+        899.55,
+        916.61,
+        887.59
+      ],
+      "area": 813573.8699,
+      "iscrowd": 0
+    },
+    {
+      "id": 20,
+      "image_id": 4,
+      "category_id": 15,
+      "bbox": [
+        713.33,
+        1878.2,
+        1071.96,
+        1152.45
+      ],
+      "area": 1235380.3020000001,
+      "iscrowd": 0
+    },
+    {
+      "id": 21,
+      "image_id": 5,
+      "category_id": 2,
+      "bbox": [
+        1082.86,
+        3178.29,
+        1540.68,
+        887.18
+      ],
+      "area": 1366860.4824,
+      "iscrowd": 0
+    },
+    {
+      "id": 22,
+      "image_id": 5,
+      "category_id": 11,
+      "bbox": [
+        1662.04,
+        1777.69,
+        955.52,
+        955.15
+      ],
+      "area": 912664.928,
+      "iscrowd": 0
+    },
+    {
+      "id": 23,
+      "image_id": 5,
+      "category_id": 12,
+      "bbox": [
+        2614.76,
+        3128.93,
+        819.9,
+        867.95
+      ],
+      "area": 711632.2050000001,
+      "iscrowd": 0
+    },
+    {
+      "id": 24,
+      "image_id": 5,
+      "category_id": 13,
+      "bbox": [
+        741.38,
+        1471.75,
+        988.19,
+        1042.02
+      ],
+      "area": 1029713.7438,
+      "iscrowd": 0
+    },
+    {
+      "id": 25,
+      "image_id": 5,
+      "category_id": 18,
+      "bbox": [
+        2654.0,
+        1485.84,
+        994.4,
+        1099.29
+      ],
+      "area": 1093133.976,
+      "iscrowd": 0
+    },
+    {
+      "id": 26,
+      "image_id": 6,
+      "category_id": 4,
+      "bbox": [
+        2283.9747716398433,
+        1428.6211396259241,
+        1171.2918660287082,
+        1189.0387124836884
+      ],
+      "area": 1392711.3723253922,
+      "iscrowd": 0
+    },
+    {
+      "id": 27,
+      "image_id": 6,
+      "category_id": 5,
+      "bbox": [
+        1409.88,
+        1391.99,
+        1199.28,
+        1297.58
+      ],
+      "area": 1556161.7423999999,
+      "iscrowd": 0
+    },
+    {
+      "id": 28,
+      "image_id": 6,
+      "category_id": 6,
+      "bbox": [
+        637.92,
+        2469.69,
+        943.82,
+        1784.36
+      ],
+      "area": 1684114.6552,
+      "iscrowd": 0
+    },
+    {
+      "id": 29,
+      "image_id": 6,
+      "category_id": 8,
+      "bbox": [
+        1377.3,
+        3210.73,
+        975.4,
+        1018.17
+      ],
+      "area": 993123.0179999999,
+      "iscrowd": 0
+    },
+    {
+      "id": 30,
+      "image_id": 6,
+      "category_id": 9,
+      "bbox": [
+        2799.66,
+        3187.63,
+        830.2,
+        796.13
+      ],
+      "area": 660947.126,
+      "iscrowd": 0
+    },
+    {
+      "id": 31,
+      "image_id": 7,
+      "category_id": 11,
+      "bbox": [
+        1393.53,
+        2271.36,
+        726.85,
+        735.8
+      ],
+      "area": 534816.23,
+      "iscrowd": 0
+    },
+    {
+      "id": 32,
+      "image_id": 7,
+      "category_id": 12,
+      "bbox": [
+        1920.8,
+        1627.43,
+        646.55,
+        667.26
+      ],
+      "area": 431416.953,
+      "iscrowd": 0
+    },
+    {
+      "id": 33,
+      "image_id": 7,
+      "category_id": 13,
+      "bbox": [
+        656.01,
+        844.12,
+        716.09,
+        790.88
+      ],
+      "area": 566341.2592,
+      "iscrowd": 0
+    },
+    {
+      "id": 34,
+      "image_id": 7,
+      "category_id": 14,
+      "bbox": [
+        1369.04,
+        940.16,
+        866.21,
+        854.53
+      ],
+      "area": 740202.4313,
+      "iscrowd": 0
+    },
+    {
+      "id": 35,
+      "image_id": 7,
+      "category_id": 15,
+      "bbox": [
+        306.9473684210526,
+        1614.3157894736842,
+        1144.4210526315787,
+        1455.157894736842
+      ],
+      "area": 1665313.3296398888,
+      "iscrowd": 0
+    },
+    {
+      "id": 36,
+      "image_id": 8,
+      "category_id": 2,
+      "bbox": [
+        669.914958677686,
+        2908.99,
+        1414.5750413223138,
+        934.54
+      ],
+      "area": 1321976.959117355,
+      "iscrowd": 0
+    },
+    {
+      "id": 37,
+      "image_id": 8,
+      "category_id": 11,
+      "bbox": [
+        772.36,
+        2185.7,
+        971.01,
+        901.55
+      ],
+      "area": 875414.0654999999,
+      "iscrowd": 0
+    },
+    {
+      "id": 38,
+      "image_id": 8,
+      "category_id": 12,
+      "bbox": [
+        2855.43,
+        3214.54,
+        878.26,
+        880.79
+      ],
+      "area": 773562.6253999999,
+      "iscrowd": 0
+    },
+    {
+      "id": 39,
+      "image_id": 8,
+      "category_id": 13,
+      "bbox": [
+        2190.43,
+        2502.47,
+        1077.81,
+        1038.6
+      ],
+      "area": 1119413.4659999998,
+      "iscrowd": 0
+    },
+    {
+      "id": 40,
+      "image_id": 8,
+      "category_id": 18,
+      "bbox": [
+        2324.51,
+        1215.44,
+        1210.36,
+        1049.9
+      ],
+      "area": 1270756.964,
+      "iscrowd": 0
+    },
+    {
+      "id": 41,
+      "image_id": 9,
+      "category_id": 4,
+      "bbox": [
+        2612.79,
+        2662.9,
+        1076.67,
+        1669.74
+      ],
+      "area": 1797758.9658000001,
+      "iscrowd": 0
+    },
+    {
+      "id": 42,
+      "image_id": 9,
+      "category_id": 5,
+      "bbox": [
+        2094.59,
+        1493.45,
+        1300.26,
+        1276.26
+      ],
+      "area": 1659469.8276,
+      "iscrowd": 0
+    },
+    {
+      "id": 43,
+      "image_id": 9,
+      "category_id": 6,
+      "bbox": [
+        592.43,
+        3214.72,
+        1771.27,
+        900.76
+      ],
+      "area": 1595489.1652,
+      "iscrowd": 0
+    },
+    {
+      "id": 44,
+      "image_id": 9,
+      "category_id": 8,
+      "bbox": [
+        959.45,
+        2428.1,
+        1028.2,
+        968.43
+      ],
+      "area": 995739.726,
+      "iscrowd": 0
+    },
+    {
+      "id": 45,
+      "image_id": 9,
+      "category_id": 9,
+      "bbox": [
+        948.1,
+        1720.69,
+        745.65,
+        747.39
+      ],
+      "area": 557291.3535,
+      "iscrowd": 0
+    }
+  ],
+  "categories": [
+    {
+      "id": 2,
+      "name": "Croffle",
+      "supercategory": "bread"
+    },
+    {
+      "id": 4,
+      "name": "Scone",
+      "supercategory": "bread"
+    },
+    {
+      "id": 5,
+      "name": "Half-moon Croissant",
+      "supercategory": "bread"
+    },
+    {
+      "id": 6,
+      "name": "Croissant",
+      "supercategory": "bread"
+    },
+    {
+      "id": 7,
+      "name": "Flower Bread",
+      "supercategory": "bread"
+    },
+    {
+      "id": 8,
+      "name": "Almond Scone",
+      "supercategory": "bread"
+    },
+    {
+      "id": 9,
+      "name": "Dinner Roll",
+      "supercategory": "bread"
+    },
+    {
+      "id": 10,
+      "name": "Sugar Donut",
+      "supercategory": "bread"
+    },
+    {
+      "id": 11,
+      "name": "Bagel",
+      "supercategory": "bread"
+    },
+    {
+      "id": 12,
+      "name": "Egg Tart",
+      "supercategory": "bread"
+    },
+    {
+      "id": 13,
+      "name": "Muffin",
+      "supercategory": "bread"
+    },
+    {
+      "id": 14,
+      "name": "Burger",
+      "supercategory": "bread"
+    },
+    {
+      "id": 15,
+      "name": "Sandwich",
+      "supercategory": "bread"
+    },
+    {
+      "id": 18,
+      "name": "Mini Bread",
+      "supercategory": "bread"
+    },
+    {
+      "id": 19,
+      "name": "Pastry Bread",
+      "supercategory": "bread"
+    }
+  ],
+  "info": {
+    "description": "COCO export from bbox_labeler",
+    "version": "1.0"
+  },
+  "licenses": []
+}
