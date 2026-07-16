@@ -86,4 +86,4 @@
 - `python -m pip check`: no broken requirements.
 - Independent code review found no remaining Critical or Important issues after regression fixes.
 - Verification-only artifacts were removed; existing source images, COCO files, test splits, and `class_registry.json` were not modified.
-- No commit or push was performed.
+- The initial implementation was later published in draft PR #2; subsequent background assets are added on the same feature branch.

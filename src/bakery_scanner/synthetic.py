@@ -8,6 +8,7 @@ import os
 import random
 import re
 import shutil
+import time
 import uuid
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -24,6 +25,8 @@ MANIFEST_VERSION = 1
 _RUN_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 _SCENE_NAME = re.compile(r"^scene_\d{6}\.png$")
 _PLACEMENT_ATTEMPTS = 500
+_RENAME_ATTEMPTS = 20
+_RENAME_DELAY_SECONDS = 0.05
 
 
 @dataclass(frozen=True, slots=True)
@@ -263,6 +266,17 @@ def _png_bytes(image: Image.Image) -> bytes:
     return buffer.getvalue()
 
 
+def _rename_with_retry(source: Path, target: Path) -> Path:
+    for attempt in range(_RENAME_ATTEMPTS):
+        try:
+            return source.rename(target)
+        except PermissionError:
+            if attempt == _RENAME_ATTEMPTS - 1:
+                raise
+            time.sleep(_RENAME_DELAY_SECONDS)
+    raise RuntimeError("unreachable rename retry state")
+
+
 def _config_payload(config: SyntheticConfig) -> dict[str, Any]:
     payload = asdict(config)
     for key in (
@@ -420,12 +434,12 @@ def generate_synthetic_dataset(
         )
         if output_dir.exists():
             backup_dir = synthetic_root / f".{run_name}.backup-{uuid.uuid4().hex}"
-            output_dir.rename(backup_dir)
+            _rename_with_retry(output_dir, backup_dir)
         try:
-            staging_dir.rename(output_dir)
+            _rename_with_retry(staging_dir, output_dir)
         except OSError:
             if backup_dir is not None and backup_dir.exists() and not output_dir.exists():
-                backup_dir.rename(output_dir)
+                _rename_with_retry(backup_dir, output_dir)
             raise
         if backup_dir is not None:
             shutil.rmtree(backup_dir)
@@ -434,7 +448,7 @@ def generate_synthetic_dataset(
         if staging_dir.exists():
             shutil.rmtree(staging_dir, ignore_errors=True)
         if backup_dir is not None and backup_dir.exists() and not output_dir.exists():
-            backup_dir.rename(output_dir)
+            _rename_with_retry(backup_dir, output_dir)
         if isinstance(exc, OSError):
             raise DataValidationError(
                 f"cannot write synthetic run {output_dir}: {exc}"

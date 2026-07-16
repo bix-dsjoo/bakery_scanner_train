@@ -2,6 +2,8 @@ import hashlib
 import json
 import os
 import subprocess
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -253,6 +255,36 @@ def test_failed_overwrite_preserves_existing_valid_run(
     assert {
         path.name: path.read_bytes() for path in generated.output_dir.iterdir()
     } == before
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows file-lock behavior")
+def test_overwrite_waits_for_transient_windows_file_lock(
+    synthetic_inputs: tuple[Path, Path],
+) -> None:
+    dataset_root, background_dir = synthetic_inputs
+    config = _fixed_config(scene_count=1, objects_per_scene=1)
+    generated = generate_synthetic_dataset(
+        dataset_root, background_dir, "locked", config
+    )
+    ready = threading.Event()
+
+    def hold_image_open() -> None:
+        with (generated.output_dir / "scene_000000.png").open("rb"):
+            ready.set()
+            time.sleep(0.25)
+
+    holder = threading.Thread(target=hold_image_open)
+    holder.start()
+    assert ready.wait(timeout=1)
+    try:
+        regenerated = generate_synthetic_dataset(
+            dataset_root, background_dir, "locked", config, overwrite=True
+        )
+    finally:
+        holder.join(timeout=1)
+
+    assert regenerated.image_count == 1
+    assert validate_synthetic_dataset(dataset_root, "locked").image_count == 1
 
 
 def test_generate_rejects_run_link_that_resolves_to_another_run(
