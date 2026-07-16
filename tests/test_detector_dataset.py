@@ -26,15 +26,20 @@ def _prepare_sources(dataset_root: Path) -> None:
         source.save(path)
 
 
-def _generate_input_run(dataset_root: Path, tmp_path: Path, scene_count: int = 3) -> None:
+def _generate_input_run(
+    dataset_root: Path,
+    tmp_path: Path,
+    scene_count: int = 3,
+    run_name: str = "input",
+) -> None:
     _prepare_sources(dataset_root)
-    backgrounds = tmp_path / "backgrounds"
+    backgrounds = tmp_path / f"backgrounds-{run_name}"
     backgrounds.mkdir()
     Image.new("RGB", (80, 60), (210, 210, 210)).save(backgrounds / "tray.png")
     generate_synthetic_dataset(
         dataset_root,
         backgrounds,
-        "input",
+        run_name,
         SyntheticConfig(
             seed=73,
             scene_count=scene_count,
@@ -149,6 +154,47 @@ def test_split_is_deterministic_and_keeps_real_and_synthetic_resources_together(
             synthetic_splits.add(sample["split"])
     assert all(len(splits) == 1 for splits in real_by_scene.values())
     assert len(synthetic_splits) == 1
+
+
+def test_split_keeps_real_scene_groups_in_both_splits_when_synthetic_is_indivisible(
+    detector_inputs: Path, tmp_path: Path
+) -> None:
+    coco_path = detector_inputs / "base" / "val" / "instances_val.json"
+    coco = _load_json(coco_path)
+    for difficulty in "emh":
+        file_name = f"scene_{difficulty}_0003.jpg"
+        Image.new("RGB", (40, 30), "white").save(coco_path.parent / file_name)
+        coco["images"].append(
+            {
+                "id": len(coco["images"]) + 1,
+                "file_name": file_name,
+                "width": 40,
+                "height": 30,
+            }
+        )
+    _write_json(coco_path, coco)
+    _make_real_images_unique(detector_inputs)
+    _generate_input_run(detector_inputs, tmp_path, scene_count=100, run_name="large-input")
+    report = build_detector_dataset(
+        detector_inputs,
+        "large-input",
+        "origin-aware",
+        DetectorDatasetConfig(seed=42, validation_fraction=0.2),
+    )
+
+    samples = _load_json(report.manifest_path)["samples"]
+    real_samples = [item for item in samples if item["origin"] == "real"]
+    synthetic_samples = [item for item in samples if item["origin"] == "synthetic"]
+    assert {item["split"] for item in real_samples} == {"train", "validation"}
+    assert len({item["split"] for item in synthetic_samples}) == 1
+
+    real_splits_by_scene: dict[str, set[str]] = {}
+    for item in real_samples:
+        real_splits_by_scene.setdefault(item["provenance"]["scene_id"], set()).add(
+            item["split"]
+        )
+    assert all(len(splits) == 1 for splits in real_splits_by_scene.values())
+    assert validate_detector_dataset(detector_inputs, "origin-aware").image_count == 109
 
 
 def test_seed_controls_which_safe_component_is_used_for_validation(
