@@ -192,7 +192,7 @@ bakery-synthetic validate --dataset-root datasets --run-name base_seed42
 bakery-detector-data generate `
   --dataset-root datasets `
   --synthetic-run base_seed42 `
-  --run-name base_seed42_detector `
+  --run-name base_seed42_detector_origin_aware `
   --seed 42 `
   --validation-fraction 0.2
 ```
@@ -200,7 +200,7 @@ bakery-detector-data generate `
 설치된 console script 대신 module로도 같은 작업을 실행할 수 있습니다.
 
 ```powershell
-python -m bakery_scanner.detector_cli generate --dataset-root datasets --synthetic-run base_seed42 --run-name base_seed42_detector --seed 42 --validation-fraction 0.2
+python -m bakery_scanner.detector_cli generate --dataset-root datasets --synthetic-run base_seed42 --run-name base_seed42_detector_origin_aware --seed 42 --validation-fraction 0.2
 ```
 
 완성된 run의 manifest, 입력 provenance, 입력·출력 SHA-256, 이미지 inventory, 두 COCO, bbox와 split 누수를 독립적으로 다시 검사합니다.
@@ -208,13 +208,13 @@ python -m bakery_scanner.detector_cli generate --dataset-root datasets --synthet
 ```powershell
 bakery-detector-data validate `
   --dataset-root datasets `
-  --run-name base_seed42_detector
+  --run-name base_seed42_detector_origin_aware
 ```
 
 출력 구조는 다음과 같습니다.
 
 ```text
-datasets/derived/detector/base_seed42_detector/
+datasets/derived/detector/base_seed42_detector_origin_aware/
   manifest.json
   train/
     images/
@@ -226,9 +226,7 @@ datasets/derived/detector/base_seed42_detector/
 
 두 COCO의 category는 `{"id": 1, "name": "bread"}` 하나뿐입니다. 원본 COCO `category_id`는 sample별 `original_annotations`와 합성 객체 provenance에만 보존되며 `model_index`로 변환하거나 혼용하지 않습니다. annotation이 없는 정상 이미지도 빈 annotation 목록으로 유지됩니다.
 
-분할은 이미지별 독립 난수가 아니라 누수 자원의 연결 component 단위로 수행합니다. 실제 `scene_e/m/h`의 동일 scene ID, 합성 원본 객체의 정규화 경로와 SHA-256, 합성 배경의 정규화 경로와 SHA-256, 동일 이미지 SHA-256을 공유하는 장면은 반드시 같은 split으로 이동합니다. seed는 안전한 component 후보의 결정론적 순서에 사용되며, 요청한 validation 비율에 가장 가까운 비어 있지 않은 component 조합을 선택합니다. 모든 입력이 하나의 component로 연결되어 train/validation을 모두 만들 수 없으면 오류로 종료합니다.
-
-현재 split 최적화는 전체 이미지 수와 누수 안전성을 기준으로 하며 real/synthetic origin별 최소 수량은 보장하지 않습니다. 공유 provenance가 많은 합성 run은 하나의 큰 component가 될 수 있으므로, 학습 전에 manifest의 origin별 train/validation 분포를 확인해야 합니다.
+분할은 이미지별 독립 난수가 아니라 누수 자원의 전역 연결 component 단위로 수행합니다. 실제 `scene_e/m/h`의 동일 scene ID, 합성 원본 객체의 정규화 경로와 SHA-256, 합성 배경의 정규화 경로와 SHA-256, 동일 이미지 SHA-256을 공유하는 장면은 origin과 무관하게 반드시 같은 split으로 이동합니다. 이 component 중 실제 장면을 포함한 그룹과 합성 전용 그룹을 seed 기반으로 각각 최적화합니다. 따라서 독립적인 실제 scene group이 둘 이상이면 실제 장면이 train과 validation에 모두 포함되며, 하나뿐인 합성 component는 train에 유지됩니다. 어느 origin group도 자체 validation을 만들 수 없을 때만 전역 component 선택으로 안전하게 fallback합니다. 모든 입력이 하나의 component로 연결되어 train/validation을 모두 만들 수 없으면 오류로 종료합니다.
 
 생성은 `datasets/derived/detector/` 아래 임시 staging run에서 전체 검증을 통과한 뒤 원자적으로 publish합니다. 기존 run은 `--overwrite` 없이는 거부하며, 교체 실패 시 기존 run을 복구합니다. test 경로, 잘못된 bbox, 누락·추가·변조 파일, source hash 변경과 split 누수는 모두 exit code `1` 오류입니다. 두 subcommand 모두 자동 처리용 `--json`을 지원합니다.
 

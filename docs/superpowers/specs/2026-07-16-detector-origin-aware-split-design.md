@@ -23,20 +23,26 @@ the assembled detector dataset unsuitable as a mixed-source training baseline.
 
 ## Decision
 
-Split each origin independently, then combine the assignments:
+Build global leakage components first, then optimize the origin groups without
+ever splitting a component:
 
-- Real samples use the existing resource-component algorithm.  `real-scene:<id>`
-  remains a resource, so every `scene_e/m/h_<id>` group remains in one split.
-- Synthetic samples use the same component algorithm over their object,
-  background, and image resources.  Reused objects or backgrounds can therefore
-  never cross splits.
+- All samples first use one resource-component algorithm.  This preserves
+  cross-origin safety: a real and synthetic sample sharing an image hash is one
+  inseparable component.
+- Components containing real samples form the real group.  Synthetic-only
+  components form the synthetic group.  `real-scene:<id>` remains a resource, so
+  every `scene_e/m/h_<id>` group remains in one split.
+- Synthetic source objects, backgrounds, and image hashes remain component
+  resources, so they cannot cross splits.
 - Both origin subsets must produce non-empty train and validation assignments
   when that origin has at least two independent components.  An origin with one
   component is assigned to train; it cannot safely supply validation data.
 - The requested validation fraction is applied within each origin that can be
   split.  The seeded component ordering retains deterministic selection.
 - A dataset remains invalid if every input sample belongs to one leakage
-  component, because neither split can be made safely.
+  component, because neither split can be made safely.  If no origin group has
+  multiple components, the existing global component assignment is used as a
+  deterministic safe fallback.
 
 For the checked-in `base_seed42` data and seed 42, the 100-scene synthetic
 component remains in train.  The three real groups are split as two groups (six
