@@ -301,11 +301,7 @@ def _load_synthetic_samples(root: Path, synthetic_run: str) -> list[_Sample]:
     return samples
 
 
-def _split_samples(
-    samples: list[_Sample], validation_fraction: float, seed: int
-) -> dict[str, str]:
-    if len(samples) < 2:
-        raise DataValidationError("safe train/validation split requires at least two images")
+def _leakage_components(samples: list[_Sample]) -> list[list[_Sample]]:
     parents = list(range(len(samples)))
 
     def find(index: int) -> int:
@@ -326,38 +322,76 @@ def _split_samples(
             owner = resource_owner.setdefault(resource, index)
             union(index, owner)
 
-    components_by_root: dict[int, list[int]] = {}
-    for index in range(len(samples)):
-        components_by_root.setdefault(find(index), []).append(index)
-    components = [
-        sorted(group, key=lambda index: samples[index].key)
-        for group in components_by_root.values()
-    ]
-    if len(components) < 2:
-        raise DataValidationError(
-            "safe train/validation split is impossible because all images share leakage resources"
-        )
-    components.sort(key=lambda group: tuple(samples[index].key for index in group))
-    random.Random(seed).shuffle(components)
+    components_by_root: dict[int, list[_Sample]] = {}
+    for index, sample in enumerate(samples):
+        components_by_root.setdefault(find(index), []).append(sample)
+    return sorted(
+        (sorted(group, key=lambda sample: sample.key) for group in components_by_root.values()),
+        key=lambda group: tuple(sample.key for sample in group),
+    )
+
+
+def _assign_validation_components(
+    components: list[list[_Sample]], validation_fraction: float, seed: int
+) -> dict[str, str]:
+    shuffled_components = list(components)
+    random.Random(seed).shuffle(shuffled_components)
 
     choices: dict[int, tuple[int, ...]] = {0: ()}
-    for component_index, component in enumerate(components):
+    for component_index, component in enumerate(shuffled_components):
         for count, selected in list(choices.items()):
             choices.setdefault(count + len(component), (*selected, component_index))
-    target = len(samples) * validation_fraction
-    valid_counts = [count for count in choices if 0 < count < len(samples)]
+    total_image_count = sum(len(component) for component in shuffled_components)
+    target = total_image_count * validation_fraction
+    valid_counts = [count for count in choices if 0 < count < total_image_count]
     if not valid_counts:
         raise DataValidationError("safe train/validation split is impossible")
     validation_count = min(valid_counts, key=lambda count: (abs(count - target), count))
     selected_components = set(choices[validation_count])
-    validation_indices = {
-        index
-        for component_index in selected_components
-        for index in components[component_index]
-    }
     return {
-        sample.key: ("validation" if index in validation_indices else "train")
-        for index, sample in enumerate(samples)
+        sample.key: ("validation" if component_index in selected_components else "train")
+        for component_index, component in enumerate(shuffled_components)
+        for sample in component
+    }
+
+
+def _split_samples(
+    samples: list[_Sample], validation_fraction: float, seed: int
+) -> dict[str, str]:
+    if len(samples) < 2:
+        raise DataValidationError("safe train/validation split requires at least two images")
+    components = _leakage_components(samples)
+    if len(components) < 2:
+        raise DataValidationError(
+            "safe train/validation split is impossible because all images share leakage resources"
+        )
+
+    real_components = [
+        component
+        for component in components
+        if any(sample.origin == "real" for sample in component)
+    ]
+    synthetic_only_components = [
+        component
+        for component in components
+        if all(sample.origin == "synthetic" for sample in component)
+    ]
+    assignments: dict[str, str] = {
+        sample.key: "train" for component in components for sample in component
+    }
+    for offset, origin_components in enumerate(
+        (real_components, synthetic_only_components)
+    ):
+        if len(origin_components) >= 2:
+            assignments.update(
+                _assign_validation_components(
+                    origin_components, validation_fraction, seed + offset
+                )
+            )
+    if "validation" not in assignments.values():
+        return _assign_validation_components(components, validation_fraction, seed)
+    return {
+        sample.key: assignments[sample.key] for sample in samples
     }
 
 
