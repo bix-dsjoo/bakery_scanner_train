@@ -156,6 +156,68 @@ def test_split_is_deterministic_and_keeps_real_and_synthetic_resources_together(
     assert len(synthetic_splits) == 1
 
 
+def test_split_falls_back_to_global_components_when_origins_are_indivisible(
+    detector_inputs: Path,
+) -> None:
+    report = build_detector_dataset(
+        detector_inputs,
+        "input",
+        "fallback",
+        DetectorDatasetConfig(seed=123, validation_fraction=1 / 3),
+    )
+
+    samples = _load_json(report.manifest_path)["samples"]
+    origin_splits = {
+        origin: {item["split"] for item in samples if item["origin"] == origin}
+        for origin in ("real", "synthetic")
+    }
+    assert origin_splits["real"] in ({"train"}, {"validation"})
+    assert origin_splits["synthetic"] in ({"train"}, {"validation"})
+    assert {item["split"] for item in samples} == {"train", "validation"}
+    assert validate_detector_dataset(detector_inputs, "fallback").image_count == 9
+
+
+def test_split_keeps_cross_origin_image_hash_bridge_together(
+    detector_inputs: Path,
+) -> None:
+    _make_real_images_unique(detector_inputs)
+    coco_path = detector_inputs / "base" / "val" / "instances_val.json"
+    coco = _load_json(coco_path)
+    synthetic_path = (
+        detector_inputs / "derived" / "synthetic" / "input" / "scene_000000.png"
+    )
+    bridged_name = "scene_e_0001.jpg"
+    bridged_image = next(item for item in coco["images"] if item["file_name"] == bridged_name)
+    bridged_path = coco_path.parent / bridged_name
+    bridged_path.write_bytes(synthetic_path.read_bytes())
+    with Image.open(synthetic_path) as decoded:
+        bridged_image["width"], bridged_image["height"] = decoded.size
+    _write_json(coco_path, coco)
+
+    report = build_detector_dataset(
+        detector_inputs,
+        "input",
+        "cross-origin-bridge",
+        DetectorDatasetConfig(seed=42, validation_fraction=0.2),
+    )
+
+    samples = _load_json(report.manifest_path)["samples"]
+    bridge_split = next(
+        item["split"]
+        for item in samples
+        if item["origin"] == "real" and item["provenance"]["scene_id"] == "0001"
+    )
+    assert {
+        item["split"]
+        for item in samples
+        if item["origin"] == "real" and item["provenance"]["scene_id"] == "0001"
+    } == {bridge_split}
+    assert {
+        item["split"] for item in samples if item["origin"] == "synthetic"
+    } == {bridge_split}
+    assert validate_detector_dataset(detector_inputs, "cross-origin-bridge").image_count == 9
+
+
 def test_split_keeps_real_scene_groups_in_both_splits_when_synthetic_is_indivisible(
     detector_inputs: Path, tmp_path: Path
 ) -> None:

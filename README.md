@@ -186,7 +186,7 @@ bakery-synthetic validate --dataset-root datasets --run-name base_seed42
 
 `bakery-detector-data`는 실제 train-side 장면인 `datasets/base/val/instances_val.json`과 이미 생성·검증된 합성 run 하나를 조립합니다. detector 학습이나 추론은 실행하지 않습니다. 먼저 위의 `bakery-synthetic validate`가 통과하는 합성 run이 있어야 합니다.
 
-다음 예시는 `base_seed42` 합성 run을 사용해 `datasets/derived/detector/base_seed42_detector/`를 생성합니다.
+다음 예시는 `base_seed42` 합성 run을 사용해 `datasets/derived/detector/base_seed42_detector_origin_aware/`를 생성합니다.
 
 ```powershell
 bakery-detector-data generate `
