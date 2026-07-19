@@ -99,3 +99,14 @@
 - `docs/superpowers/specs/2026-07-16-bakery-scanner-design.md`
 
 문서와 코드가 다르면 구현을 사실로 간주하지 말고, 승인된 설계와 사용자 의도를 확인해 둘을 함께 수정한다.
+
+## 에이전트 Git 작업 규칙
+
+- 모든 에이전트 변경은 최신 `main`에서 만든 `codex/<type>-<short-description>` 작업 브랜치와 PR을 통해서만 `main`에 병합한다.
+- `main`에는 직접 commit, direct push, force push를 하지 않는다. 병합은 squash merge만 사용한다.
+- 구현 에이전트는 자신이 만든 작업 브랜치의 유일한 작성자다. 같은 브랜치를 여러 구현 에이전트가 병렬로 수정하지 않는다.
+- PR이 Ready for review가 되면 구현 에이전트와 다른 에이전트 인스턴스가 새 컨텍스트에서 독립 리뷰를 수행한다. diff가 바뀌면 리뷰와 영향을 받는 검증을 다시 수행한다.
+- 병합 에이전트는 최신 `main` 반영, 필수 CI, 해결되지 않은 대화 없음, 독립 리뷰, PR 검증 증거를 확인한 뒤에만 병합한다.
+- 작업 브랜치의 중간 commit은 허용하지만 `main`의 squash commit과 PR 제목·본문은 한국어로 작성한다. commit 형식은 `<type>[선택 범위]: <명령형 한국어 요약>`이며, 허용 유형은 `feat`, `fix`, `refactor`, `test`, `docs`, `data`, `experiment`, `perf`, `build`, `ci`, `chore`, `revert`다.
+- 병합 뒤 원격 작업 브랜치를 삭제한다. 문제를 되돌릴 때는 새 `codex/fix-...` 작업 브랜치 또는 GitHub revert PR을 사용하며 `main` 이력을 재작성하지 않는다.
+- 상세 절차와 GitHub 설정 요구는 `docs/agent-git-workflow.md`를 따른다.
