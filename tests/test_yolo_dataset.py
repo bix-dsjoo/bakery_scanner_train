@@ -1,56 +1,10 @@
 import json
 from pathlib import Path
-from typing import Callable
 
 import pytest
-from PIL import Image
 
-from bakery_scanner.detector_dataset import (
-    DetectorDatasetConfig,
-    build_detector_dataset,
-)
 from bakery_scanner.errors import DataValidationError
-from bakery_scanner.synthetic import SyntheticConfig, generate_synthetic_dataset
 from bakery_scanner.yolo_dataset import build_yolo_dataset, validate_yolo_dataset
-
-
-@pytest.fixture
-def detector_source_run(
-    dataset_factory: Callable[[], Path], tmp_path: Path
-) -> tuple[Path, str]:
-    dataset_root = dataset_factory()
-    for model_index, path in enumerate(sorted(dataset_root.glob("*/bread_*/*.jpg"))):
-        source = Image.new("RGB", (12, 10), "white")
-        for x in range(2, 10):
-            for y in range(3, 8):
-                source.putpixel((x, y), (170, 60 + model_index, 20))
-        source.save(path)
-
-    backgrounds = tmp_path / "backgrounds"
-    backgrounds.mkdir()
-    Image.new("RGB", (80, 60), (210, 210, 210)).save(backgrounds / "tray.png")
-    generate_synthetic_dataset(
-        dataset_root,
-        backgrounds,
-        "synthetic-input",
-        SyntheticConfig(
-            seed=5,
-            scene_count=2,
-            objects_per_scene=1,
-            size_fraction_range=(0.2, 0.2),
-            rotation_range=(0.0, 0.0),
-            brightness_range=(1.0, 1.0),
-            contrast_range=(1.0, 1.0),
-        ),
-    )
-    source_run = "detector-input"
-    build_detector_dataset(
-        dataset_root,
-        "synthetic-input",
-        source_run,
-        DetectorDatasetConfig(seed=11, validation_fraction=0.25),
-    )
-    return dataset_root, source_run
 
 
 def _tree_bytes(path: Path) -> dict[str, bytes]:
