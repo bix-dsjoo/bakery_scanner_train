@@ -278,3 +278,5 @@ python -m pytest -q
 ## 설계 문서
 
 상세한 데이터 경계, 오류 처리와 검증 요구사항은 [`docs/superpowers/specs/2026-07-16-bakery-scanner-design.md`](docs/superpowers/specs/2026-07-16-bakery-scanner-design.md)를 따릅니다.
+
+- [에이전트 전용 Git 작업 흐름](docs/agent-git-workflow.md): 브랜치, 커밋, PR, 독립 리뷰와 자율 병합 규칙
