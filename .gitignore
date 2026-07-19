@@ -5,6 +5,7 @@ __pycache__/
 build/
 dist/
 .venv/
+.worktrees/
 
 # Reproducible local dataset runs (manifests and images are generated together).
 datasets/derived/synthetic/
