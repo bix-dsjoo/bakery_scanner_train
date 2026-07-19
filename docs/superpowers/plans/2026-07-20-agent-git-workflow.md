@@ -10,7 +10,7 @@
 
 ## 전역 제약
 
-- 모든 새 문서 문장, PR 제목·본문 예시, 커밋 메시지 예시는 한국어로 작성한다.
+- 모든 새 문서 문장과 PR 제목·본문 예시는 한국어로 작성한다. 커밋 메시지는 영어 유형과 한국어 범위·요약을 사용한다.
 - 브랜치 식별자는 Codex 기본 접두사인 `codex/`와 ASCII 유형을 사용한다.
 - `main` 직접 push, force push, 직접 커밋을 금지하고 모든 변경은 PR을 통해 squash merge한다.
 - 구현, 독립 리뷰, 병합은 서로 다른 에이전트 인스턴스가 담당한다. 리뷰 승인이 필요한 GitHub 설정에서는 구현 에이전트와 다른 승인 가능한 봇 또는 서비스 계정을 사용한다.
@@ -38,24 +38,24 @@ rg -n "feat|fix|refactor|test|docs|data|experiment|perf|build|ci|chore|Conventio
 
 예상 결과: 영어 브랜치 유형과 영어 squash 커밋 예시가 표시된다.
 
-- [ ] **2단계: 한국어 커밋 유형과 제목 형식으로 교체한다**
+- [ ] **2단계: 영어 커밋 유형과 한국어 제목 형식으로 교체한다**
 
 설계 문서의 커밋 형식을 다음으로 바꾼다.
 
 ```text
-<유형>[선택 범위]: <명령형 한국어 요약>
+<type>[선택 범위]: <명령형 한국어 요약>
 ```
 
 허용 커밋 유형은 다음으로 명시한다.
 
 ```text
-기능, 수정, 개선, 시험, 문서, 데이터, 실험, 성능, 빌드, 자동화, 정리, 되돌림
+feat, fix, refactor, test, docs, data, experiment, perf, build, ci, chore, revert
 ```
 
 영어 예시 `fix(dataset): reject evaluation split references`는 다음으로 교체한다.
 
 ```text
-수정(데이터): 평가 전용 split 참조를 거부한다
+fix(데이터): 평가 전용 split 참조를 거부한다
 ```
 
 PR 제목과 본문도 한국어로 작성한다는 문장을 PR 계약에 추가한다. 브랜치 이름의 ASCII 유형은 기술 식별자임을 명시해 커밋 메시지 규칙과 구분한다.
@@ -75,7 +75,7 @@ rg -n "fix\(dataset\)|Conventional Commits" docs/superpowers/specs/2026-07-20-ag
 
 ```powershell
 git add -- docs/superpowers/specs/2026-07-20-agent-git-workflow-design.md
-git commit -m "문서: 한국어 Git 메시지 규칙을 설계에 반영한다"
+git commit -m "docs: 영어 Git 유형 규칙을 설계에 반영한다"
 ```
 
 ### 작업 2: AGENTS.md에 실행 규칙 추가
@@ -109,7 +109,7 @@ Get-Content -Raw -Encoding utf8 AGENTS.md
 - 구현 에이전트는 자신이 만든 작업 브랜치의 유일한 작성자다. 같은 브랜치를 여러 구현 에이전트가 병렬로 수정하지 않는다.
 - PR이 Ready for review가 되면 구현 에이전트와 다른 에이전트 인스턴스가 새 컨텍스트에서 독립 리뷰를 수행한다. diff가 바뀌면 리뷰와 영향을 받는 검증을 다시 수행한다.
 - 병합 에이전트는 최신 `main` 반영, 필수 CI, 해결되지 않은 대화 없음, 독립 리뷰, PR 검증 증거를 확인한 뒤에만 병합한다.
-- 작업 브랜치의 중간 commit은 허용하지만 `main`의 squash commit과 PR 제목·본문은 한국어로 작성한다. commit 형식은 `<유형>[선택 범위]: <명령형 한국어 요약>`이며, 허용 유형은 `기능`, `수정`, `개선`, `시험`, `문서`, `데이터`, `실험`, `성능`, `빌드`, `자동화`, `정리`, `되돌림`이다.
+- 작업 브랜치의 중간 commit은 허용하지만 `main`의 squash commit과 PR 제목·본문은 한국어로 작성한다. commit 형식은 `<type>[선택 범위]: <명령형 한국어 요약>`이며, 허용 유형은 `feat`, `fix`, `refactor`, `test`, `docs`, `data`, `experiment`, `perf`, `build`, `ci`, `chore`, `revert`다.
 - 병합 뒤 원격 작업 브랜치를 삭제한다. 문제를 되돌릴 때는 새 `codex/fix-...` 작업 브랜치 또는 GitHub revert PR을 사용하며 `main` 이력을 재작성하지 않는다.
 - 상세 절차와 GitHub 설정 요구는 `docs/agent-git-workflow.md`를 따른다.
 ```
@@ -131,7 +131,7 @@ rg -n "에이전트 Git 작업 규칙|datasets/base/test|datasets/incremental/te
 
 ```powershell
 git add -- AGENTS.md
-git commit -m "문서: 에이전트 Git 작업 규칙을 추가한다"
+git commit -m "docs: 에이전트 Git 작업 규칙을 추가한다"
 ```
 
 ### 작업 3: 상세 에이전트 Git 작업 흐름 문서 작성
@@ -162,7 +162,7 @@ git commit -m "문서: 에이전트 Git 작업 규칙을 추가한다"
 
 작업 브랜치는 `codex/<type>-<short-description>` 형식을 사용한다. `<type>`에는 `feat`, `fix`, `refactor`, `test`, `docs`, `data`, `experiment`, `perf`, `build`, `ci`, `chore`만 사용한다. 이는 Git 식별자이며 한국어 문서·커밋 규칙의 예외다.
 
-`main`에는 직접 commit, direct push, force push를 하지 않는다. 작업 브랜치의 중간 commit은 허용하지만 `main`에는 squash merge만 사용한다. squash commit은 `<유형>[선택 범위]: <명령형 한국어 요약>` 형식을 사용하고, PR 제목·본문도 한국어로 작성한다.
+`main`에는 직접 commit, direct push, force push를 하지 않는다. 작업 브랜치의 중간 commit은 허용하지만 `main`에는 squash merge만 사용한다. squash commit은 `<type>[선택 범위]: <명령형 한국어 요약>` 형식을 사용하고, PR 제목·본문도 한국어로 작성한다.
 
 ## PR 생성과 검증 증거
 
@@ -211,7 +211,7 @@ rg -n "구현 에이전트|독립 리뷰 에이전트|병합 에이전트|squash
 
 ```powershell
 git add -- docs/agent-git-workflow.md
-git commit -m "문서: 에이전트 전용 Git 작업 흐름을 추가한다"
+git commit -m "docs: 에이전트 전용 Git 작업 흐름을 추가한다"
 ```
 
 ### 작업 4: 한국어 PR 템플릿과 README 안내 추가
@@ -294,7 +294,7 @@ rg -n "에이전트 전용 Git 작업 흐름" README.md
 
 ```powershell
 git add -- .github/pull_request_template.md README.md
-git commit -m "문서: 에이전트 PR 양식과 안내를 추가한다"
+git commit -m "docs: 에이전트 PR 양식과 안내를 추가한다"
 ```
 
 ### 작업 5: 전체 문서 일관성 검토와 최종 검증
@@ -339,7 +339,7 @@ git log --format=%s main..HEAD
 
 ```powershell
 git add -- AGENTS.md README.md docs/superpowers/specs/2026-07-20-agent-git-workflow-design.md docs/agent-git-workflow.md .github/pull_request_template.md
-git commit -m "문서: 에이전트 Git 규칙의 일관성을 검토한다"
+git commit -m "docs: 에이전트 Git 규칙의 일관성을 검토한다"
 ```
 
 수정이 없으면 이 단계에서는 새 커밋을 만들지 않는다.

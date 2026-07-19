@@ -14,9 +14,9 @@ GitHub에서 승인 규칙을 사용할 때는 구현 에이전트와 다른 승
 
 작업 브랜치는 `codex/<type>-<short-description>` 형식을 사용한다. `<type>`에는 `feat`, `fix`, `refactor`, `test`, `docs`, `data`, `experiment`, `perf`, `build`, `ci`, `chore`만 사용한다. 이는 Git 식별자이며 한국어 문서·커밋 규칙의 예외다.
 
-`main`에는 직접 commit, direct push, force push를 하지 않는다. 작업 브랜치의 중간 commit은 허용하지만 `main`에는 squash merge만 사용한다. squash commit은 `<유형>[선택 범위]: <명령형 한국어 요약>` 형식을 사용하고, PR 제목·본문도 한국어로 작성한다.
+`main`에는 직접 commit, direct push, force push를 하지 않는다. 작업 브랜치의 중간 commit은 허용하지만 `main`에는 squash merge만 사용한다. squash commit은 `<type>[선택 범위]: <명령형 한국어 요약>` 형식을 사용하고, PR 제목·본문도 한국어로 작성한다.
 
-허용 유형은 `기능`, `수정`, `개선`, `시험`, `문서`, `데이터`, `실험`, `성능`, `빌드`, `자동화`, `정리`, `되돌림`이다. 예를 들어 `수정(데이터): 평가 전용 split 참조를 거부한다`와 같이 작성한다.
+허용 유형은 `feat`, `fix`, `refactor`, `test`, `docs`, `data`, `experiment`, `perf`, `build`, `ci`, `chore`, `revert`다. 예를 들어 `fix(데이터): 평가 전용 split 참조를 거부한다`와 같이 작성한다.
 
 ## PR 생성과 검증 증거
 
