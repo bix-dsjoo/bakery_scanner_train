@@ -4,6 +4,7 @@ import hashlib
 import json
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -16,6 +17,7 @@ from bakery_scanner.final_evaluation import (
     FrozenInferenceConfig,
     FrozenRegistryConfig,
     FrozenTestSplitConfig,
+    FinalInferenceBackend,
     LoadedTestSplit,
     PreparedFinalEvaluation,
     _create_start_lock,
@@ -276,3 +278,150 @@ def test_one_shot_lock_persists_as_failed_when_test_load_fails(tmp_path: Path) -
     payload = json.loads(prepared.lock_path.read_text(encoding="utf-8"))
     assert payload["status"] == "failed"
     assert "synthetic COCO failure" in payload["error"]
+
+
+class _FakeFinalDetector:
+    names = {0: "bread"}
+
+    def __init__(self, torch_module) -> None:
+        self.torch = torch_module
+        self.calls = []
+
+    def predict(self, **kwargs):
+        self.calls.append(kwargs)
+        results = []
+        for source in kwargs["source"]:
+            if "incremental" in str(source):
+                xyxy = self.torch.empty((0, 4), dtype=self.torch.float32)
+                conf = self.torch.empty((0,), dtype=self.torch.float32)
+                cls = self.torch.empty((0,), dtype=self.torch.float32)
+            else:
+                xyxy = self.torch.tensor([[1.0, 2.0, 11.0, 10.0]])
+                conf = self.torch.tensor([0.8])
+                cls = self.torch.tensor([0.0])
+            results.append(
+                SimpleNamespace(
+                    boxes=SimpleNamespace(xyxy=xyxy, conf=conf, cls=cls)
+                )
+            )
+        return results
+
+
+def _manual_split(tmp_path: Path, name: str, model_index: int) -> LoadedTestSplit:
+    from PIL import Image
+    from bakery_scanner.final_evaluation import TestImageRecord, TestObjectRecord
+
+    directory = tmp_path / name
+    directory.mkdir()
+    image_path = directory / f"{name}_scene_e_1.jpg"
+    Image.new("RGB", (20, 20), (20, 30, 40)).save(image_path)
+    phase = "base" if name == "base" else "incremental"
+    return LoadedTestSplit(
+        name=name,
+        phase=phase,
+        coco_path=directory / "instances_test.json",
+        images=(
+            TestImageRecord(
+                image_id=image_path.name,
+                image_path=image_path,
+                width=20,
+                height=20,
+                difficulty="easy",
+                objects=(
+                    TestObjectRecord(
+                        sample_id=f"{name}:sample",
+                        annotation_id=1,
+                        bbox_xyxy=(1.0, 2.0, 11.0, 10.0),
+                        category_id=1,
+                        model_index=model_index,
+                        phase=phase,
+                    ),
+                ),
+            ),
+        ),
+    )
+
+
+def test_final_inference_reuses_detector_and_batches_relevant_classifiers(
+    tmp_path: Path
+) -> None:
+    import torch
+
+    detector = _FakeFinalDetector(torch)
+
+    class FakeClassifier(torch.nn.Module):
+        def __init__(self, output_dimension: int, predicted_index: int):
+            super().__init__()
+            self.anchor = torch.nn.Parameter(torch.zeros(1))
+            self.output_dimension = output_dimension
+            self.predicted_index = predicted_index
+            self.calls = []
+
+        def forward(self, batch):
+            self.calls.append(batch)
+            logits = torch.zeros(
+                (batch.shape[0], self.output_dimension), device=batch.device
+            )
+            logits[:, self.predicted_index] = 2.0
+            return logits
+
+    base_model = FakeClassifier(15, 3)
+    incremental_model = FakeClassifier(20, 16)
+    loaded = {}
+
+    def classifier_loader(*, checkpoint, output_dimension, **kwargs):
+        loaded[checkpoint.name] = kwargs
+        return base_model if output_dimension == 15 else incremental_model
+
+    backend = FinalInferenceBackend(
+        detector_factory=lambda _checkpoint: detector,
+        classifier_loader=classifier_loader,
+        transform_factory=lambda _size: (
+            lambda _image: torch.ones((3, 8, 8), dtype=torch.float32)
+        ),
+        device_factory=lambda _value: torch.device("cuda"),
+        stacker=lambda items, _device: torch.stack(items),
+    )
+    config = load_final_evaluation_config(_write(tmp_path / "frozen.yaml", _payload()))
+
+    result = backend.predict(
+        splits={
+            "base": _manual_split(tmp_path, "base", 3),
+            "incremental": _manual_split(tmp_path, "incremental", 16),
+        },
+        detector_checkpoint=tmp_path / "detector.pt",
+        classifier_checkpoints={
+            "base": tmp_path / "base.pt",
+            "incremental": tmp_path / "incremental.pt",
+        },
+        classifier_contexts={"base": {}, "incremental": {}},
+        config=config,
+    )
+
+    assert len(detector.calls) == 2
+    assert all(call["device"] == "0" for call in detector.calls)
+    assert all(call["conf"] == 0.001 for call in detector.calls)
+    assert all(call["iou"] == 0.7 for call in detector.calls)
+    assert set(result.splits["base"].classifier_predictions) == {
+        "base",
+        "incremental",
+    }
+    assert set(result.splits["incremental"].classifier_predictions) == {
+        "incremental"
+    }
+    assert result.splits["base"].classifier_predictions["base"][0].predicted_index == 3
+    assert result.splits["incremental"].classifier_predictions["incremental"][0].predicted_index == 16
+    assert len(result.splits["base"].e2e_predictions["base"]["base_scene_e_1.jpg"]) == 1
+    assert result.splits["incremental"].e2e_predictions["incremental"]["incremental_scene_e_1.jpg"] == ()
+    assert result.splits["base"].batch_sizes["base"] == {
+        "ground_truth": (1,),
+        "detections": (1,),
+    }
+    assert result.splits["incremental"].batch_sizes["incremental"] == {
+        "ground_truth": (1,),
+        "detections": (0,),
+    }
+    assert len(base_model.calls) == 2
+    assert len(incremental_model.calls) == 3
+    assert set(loaded) == {"base.pt", "incremental.pt"}
+    assert all(call["device"].type == "cuda" for call in loaded.values())

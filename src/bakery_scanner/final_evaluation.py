@@ -6,7 +6,7 @@ import math
 import os
 import re
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePath
@@ -153,6 +153,19 @@ class LoadedTestSplit:
     phase: str
     coco_path: Path
     images: tuple[TestImageRecord, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class FinalSplitInferenceResult:
+    detector_predictions: Mapping[str, Sequence[Any]]
+    classifier_predictions: Mapping[str, Sequence[Any]]
+    e2e_predictions: Mapping[str, Mapping[str, Sequence[Any]]]
+    batch_sizes: Mapping[str, Mapping[str, Sequence[int]]]
+
+
+@dataclass(frozen=True, slots=True)
+class FinalInferenceResult:
+    splits: Mapping[str, FinalSplitInferenceResult]
 
 
 def _object(value: object, expected: set[str], label: str) -> dict[str, Any]:
@@ -800,3 +813,297 @@ def _load_locked_test_splits(
     except Exception as exc:
         _update_start_lock(prepared, status="failed", error=str(exc))
         raise
+
+
+class FinalInferenceBackend:
+    def __init__(
+        self,
+        *,
+        detector_factory: Callable[[Path], Any] | None = None,
+        classifier_loader: Callable[..., Any] | None = None,
+        transform_factory: Callable[[int], Any] | None = None,
+        device_factory: Callable[[str], Any] | None = None,
+        stacker: Callable[[Sequence[Any], Any], Any] | None = None,
+    ) -> None:
+        self._detector_factory = detector_factory or self._default_detector_factory
+        self._classifier_loader = classifier_loader or self._default_classifier_loader
+        self._transform_factory = transform_factory or self._default_transform_factory
+        self._device_factory = device_factory or self._default_device_factory
+        self._stacker = stacker or self._default_stacker
+        self._strict_device_checks = stacker is None and device_factory is None
+
+    @staticmethod
+    def _default_detector_factory(checkpoint: Path):
+        from ultralytics import YOLO
+
+        return YOLO(str(checkpoint))
+
+    @staticmethod
+    def _default_classifier_loader(*args, **kwargs):
+        from .classifier_training import _load_classifier_checkpoint_model
+
+        return _load_classifier_checkpoint_model(*args, **kwargs)
+
+    @staticmethod
+    def _default_transform_factory(image_size: int):
+        from .classifier_training import _classifier_transforms
+
+        _train, validation = _classifier_transforms(image_size)
+        return validation
+
+    @staticmethod
+    def _default_device_factory(value: str):
+        from .classifier_training import _torch_device
+
+        return _torch_device(value)
+
+    @staticmethod
+    def _default_stacker(items: Sequence[Any], device):
+        import torch
+
+        return torch.stack(tuple(items)).to(device, non_blocking=True)
+
+    @staticmethod
+    def _module_on_device(module: Any, device) -> bool:
+        parameters = tuple(module.parameters()) if hasattr(module, "parameters") else ()
+        buffers = tuple(module.buffers()) if hasattr(module, "buffers") else ()
+        return all(value.device == device for value in (*parameters, *buffers))
+
+    def _classify(
+        self,
+        crops: Sequence[Any],
+        *,
+        model: Any,
+        device: Any,
+    ) -> tuple[tuple[int, ...], tuple[float, ...]]:
+        import torch
+
+        if not crops:
+            return (), ()
+        batch = self._stacker(crops, device)
+        if self._strict_device_checks and batch.device != device:
+            raise DataValidationError("final classifier input batch is not on CUDA")
+        with torch.inference_mode():
+            probabilities = model(batch).softmax(dim=1)
+            confidences, indices = probabilities.max(dim=1)
+        if self._strict_device_checks and probabilities.device != device:
+            raise DataValidationError("final classifier output is not on CUDA")
+        return (
+            tuple(int(value) for value in indices.detach().cpu().tolist()),
+            tuple(float(value) for value in confidences.detach().cpu().tolist()),
+        )
+
+    def predict(
+        self,
+        *,
+        splits: Mapping[str, LoadedTestSplit],
+        detector_checkpoint: Path,
+        classifier_checkpoints: Mapping[str, Path],
+        classifier_contexts: Mapping[str, Mapping[str, Any]],
+        config: FinalEvaluationConfig,
+    ) -> FinalInferenceResult:
+        from PIL import Image, UnidentifiedImageError
+
+        from .classifier_evaluation import ClassifierPrediction
+        from .detector_evaluation import Detection
+        from .e2e_evaluation import EndToEndPrediction
+
+        if set(splits) != {"base", "incremental"}:
+            raise DataValidationError("final inference requires both test splits")
+        if set(classifier_checkpoints) != {"base", "incremental"} or set(
+            classifier_contexts
+        ) != {"base", "incremental"}:
+            raise DataValidationError("final inference classifier inputs are invalid")
+        device = self._device_factory(config.inference.device)
+        if self._strict_device_checks and getattr(device, "type", None) != "cuda":
+            raise DataValidationError("final evaluation backend requires CUDA")
+        detector = self._detector_factory(detector_checkpoint)
+        names = detector.names
+        if not isinstance(names, Mapping) or tuple(
+            names[index] for index in sorted(names)
+        ) != ("bread",):
+            raise DataValidationError("final detector must declare one bread class")
+
+        models = {}
+        transforms = {}
+        for name in ("base", "incremental"):
+            frozen = config.classifiers[name]
+            model = self._classifier_loader(
+                checkpoint=classifier_checkpoints[name],
+                output_dimension=frozen.output_dimension,
+                checkpoint_context=classifier_contexts[name],
+                image_size=frozen.image_size,
+                device=device,
+            )
+            if self._strict_device_checks and not self._module_on_device(model, device):
+                raise DataValidationError(
+                    f"{name} classifier model is not entirely on CUDA"
+                )
+            models[name] = model
+            transforms[name] = self._transform_factory(frozen.image_size)
+
+        split_results = {}
+        for split_name in ("base", "incremental"):
+            split = splits[split_name]
+            relevant_models = (
+                ("base", "incremental")
+                if split_name == "base"
+                else ("incremental",)
+            )
+            detector_results = detector.predict(
+                source=[str(image.image_path) for image in split.images],
+                conf=config.detector.confidence_floor,
+                iou=config.detector.nms_iou,
+                imgsz=config.detector.image_size,
+                device=config.inference.device,
+                verbose=False,
+                stream=False,
+            )
+            if len(detector_results) != len(split.images):
+                raise DataValidationError(
+                    "final detector result count does not match test images"
+                )
+            detector_predictions = {}
+            classifier_predictions = {name: [] for name in relevant_models}
+            e2e_predictions = {
+                name: {} for name in relevant_models
+            }
+            batch_sizes = {
+                name: {"ground_truth": [], "detections": []}
+                for name in relevant_models
+            }
+            for image, detector_result in zip(
+                split.images, detector_results, strict=True
+            ):
+                try:
+                    with Image.open(image.image_path) as source:
+                        scene = source.convert("RGB")
+                except (OSError, UnidentifiedImageError) as exc:
+                    raise DataValidationError(
+                        f"cannot load final test image {image.image_path}: {exc}"
+                    ) from exc
+                if scene.size != (image.width, image.height):
+                    raise DataValidationError(
+                        f"final test image size drifted: {image.image_id}"
+                    )
+                detections = []
+                for xyxy, confidence, class_index in zip(
+                    detector_result.boxes.xyxy.detach().cpu().tolist(),
+                    detector_result.boxes.conf.detach().cpu().tolist(),
+                    detector_result.boxes.cls.detach().cpu().tolist(),
+                    strict=True,
+                ):
+                    if int(class_index) != 0:
+                        raise DataValidationError(
+                            "final detector emitted a non-bread class"
+                        )
+                    x1 = max(0.0, min(float(image.width), float(xyxy[0])))
+                    y1 = max(0.0, min(float(image.height), float(xyxy[1])))
+                    x2 = max(0.0, min(float(image.width), float(xyxy[2])))
+                    y2 = max(0.0, min(float(image.height), float(xyxy[3])))
+                    if x2 <= x1 or y2 <= y1:
+                        continue
+                    detections.append(
+                        Detection((x1, y1, x2, y2), float(confidence), 0)
+                    )
+                detector_predictions[image.image_id] = tuple(detections)
+
+                for model_name in relevant_models:
+                    transform = transforms[model_name]
+                    gt_crops = [
+                        transform(
+                            scene.crop(
+                                (
+                                    math.floor(obj.bbox_xyxy[0]),
+                                    math.floor(obj.bbox_xyxy[1]),
+                                    math.ceil(obj.bbox_xyxy[2]),
+                                    math.ceil(obj.bbox_xyxy[3]),
+                                )
+                            )
+                        )
+                        for obj in image.objects
+                    ]
+                    gt_indices, gt_confidences = self._classify(
+                        gt_crops, model=models[model_name], device=device
+                    )
+                    batch_sizes[model_name]["ground_truth"].append(len(gt_crops))
+                    for obj, predicted_index, confidence in zip(
+                        image.objects,
+                        gt_indices,
+                        gt_confidences,
+                        strict=True,
+                    ):
+                        classifier_predictions[model_name].append(
+                            ClassifierPrediction(
+                                obj.sample_id,
+                                obj.model_index,
+                                predicted_index,
+                                confidence,
+                            )
+                        )
+
+                    detection_crops = [
+                        transform(
+                            scene.crop(
+                                (
+                                    math.floor(item.bbox_xyxy[0]),
+                                    math.floor(item.bbox_xyxy[1]),
+                                    math.ceil(item.bbox_xyxy[2]),
+                                    math.ceil(item.bbox_xyxy[3]),
+                                )
+                            )
+                        )
+                        for item in detections
+                    ]
+                    predicted_indices, confidences = self._classify(
+                        detection_crops, model=models[model_name], device=device
+                    )
+                    batch_sizes[model_name]["detections"].append(
+                        len(detection_crops)
+                    )
+                    image_predictions = []
+                    for detection, predicted_index, confidence in zip(
+                        detections,
+                        predicted_indices,
+                        confidences,
+                        strict=True,
+                    ):
+                        output_dimension = config.classifiers[
+                            model_name
+                        ].output_dimension
+                        if not 0 <= predicted_index < output_dimension:
+                            raise DataValidationError(
+                                f"{model_name} classifier emitted invalid model_index"
+                            )
+                        image_predictions.append(
+                            EndToEndPrediction(
+                                image_id=image.image_id,
+                                bbox_xyxy=detection.bbox_xyxy,
+                                model_index=predicted_index,
+                                detector_confidence=detection.confidence,
+                                classifier_confidence=confidence,
+                                score=detection.confidence * confidence,
+                            )
+                        )
+                    e2e_predictions[model_name][image.image_id] = tuple(
+                        image_predictions
+                    )
+
+            split_results[split_name] = FinalSplitInferenceResult(
+                detector_predictions=detector_predictions,
+                classifier_predictions={
+                    name: tuple(values)
+                    for name, values in classifier_predictions.items()
+                },
+                e2e_predictions={
+                    name: dict(values) for name, values in e2e_predictions.items()
+                },
+                batch_sizes={
+                    name: {
+                        kind: tuple(values)
+                        for kind, values in groups.items()
+                    }
+                    for name, groups in batch_sizes.items()
+                },
+            )
+        return FinalInferenceResult(split_results)
