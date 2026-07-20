@@ -1,0 +1,18 @@
+dataset_root: datasets
+source_detector_run: base_seed42_detector_origin_aware
+yolo_run_name: base_seed42_detector_origin_aware_yolo
+output_root: runs/detector
+run_name: yolo11n_base_seed42
+model: yolo11n.pt
+image_size: 640
+epochs: 50
+batch_size: 16
+seed: 42
+device: "0"
+patience: 10
+workers: 8
+thresholds:
+  confidence_floor: 0.001
+  operating_confidence: 0.25
+  nms_iou: 0.7
+  matching_iou: 0.5
