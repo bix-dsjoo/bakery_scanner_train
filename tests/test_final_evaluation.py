@@ -147,9 +147,15 @@ def test_load_final_evaluation_config_rejects_drift(
 
 
 def _prepared(tmp_path: Path) -> PreparedFinalEvaluation:
+    config_path = tmp_path / "frozen.yaml"
+    config_sha256 = (
+        hashlib.sha256(config_path.read_bytes()).hexdigest()
+        if config_path.is_file()
+        else "2" * 64
+    )
     return PreparedFinalEvaluation(
-        config_path=tmp_path / "frozen.yaml",
-        config_sha256="2" * 64,
+        config_path=config_path,
+        config_sha256=config_sha256,
         dataset_root=tmp_path / "datasets",
         registry_path=tmp_path / "datasets" / "class_registry.json",
         detector_config_path=tmp_path / "detector.yaml",
@@ -160,6 +166,7 @@ def _prepared(tmp_path: Path) -> PreparedFinalEvaluation:
         output_dir=tmp_path / "runs" / "final" / "frozen_v1",
         lock_path=tmp_path / "runs" / "final" / ".frozen_v1.started.json",
         provenance={"fixture": True},
+        evaluation_id="fixture_frozen_v1",
     )
 
 
@@ -188,6 +195,7 @@ def test_preflight_does_not_access_test_paths(tmp_path: Path, monkeypatch) -> No
 
     assert report.prepared == prepared
     assert report.status == "ready"
+    assert report.to_dict()["evaluation_id"] == "fixture_frozen_v1"
     assert accessed == []
 
 
@@ -578,5 +586,41 @@ def test_run_final_evaluation_failure_cleans_staging_and_marks_lock(
 
     assert not prepared.output_dir.exists()
     assert not list(prepared.output_dir.parent.glob(".frozen_v1.tmp-*"))
+    lock = json.loads(prepared.lock_path.read_text(encoding="utf-8"))
+    assert lock["status"] == "failed"
+
+
+def test_run_final_evaluation_rejects_config_mutation_during_inference(
+    tmp_path: Path, monkeypatch
+) -> None:
+    config_path = _write(tmp_path / "frozen.yaml", _payload())
+    config = load_final_evaluation_config(config_path)
+    prepared = _prepared(tmp_path)
+    for checkpoint in (
+        prepared.detector_checkpoint,
+        *prepared.classifier_checkpoints.values(),
+    ):
+        checkpoint.parent.mkdir(parents=True, exist_ok=True)
+        checkpoint.write_bytes(checkpoint.name.encode())
+    monkeypatch.setattr(
+        "bakery_scanner.final_evaluation.preflight_final_evaluation",
+        lambda *_args, **_kwargs: FinalEvaluationPreflightReport(prepared),
+    )
+    monkeypatch.setattr(
+        "bakery_scanner.final_evaluation._load_test_split",
+        lambda _config, _prepared, name: _manual_split(
+            tmp_path, name, 3 if name == "base" else 16
+        ),
+    )
+
+    class Backend:
+        def predict(self, **kwargs):
+            config_path.write_text("mutated: true\n", encoding="utf-8")
+            return _perfect_backend_result(kwargs["splits"])
+
+    with pytest.raises(DataValidationError, match="configuration changed"):
+        run_final_evaluation(config, config_path, Backend())
+
+    assert not prepared.output_dir.exists()
     lock = json.loads(prepared.lock_path.read_text(encoding="utf-8"))
     assert lock["status"] == "failed"

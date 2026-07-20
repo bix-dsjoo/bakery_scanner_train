@@ -27,6 +27,7 @@ def _prepared(tmp_path: Path) -> PreparedFinalEvaluation:
         output_dir=tmp_path / "runs" / "frozen_v1",
         lock_path=tmp_path / "runs" / ".frozen_v1.started.json",
         provenance={},
+        evaluation_id="fixture_frozen_v1",
     )
 
 

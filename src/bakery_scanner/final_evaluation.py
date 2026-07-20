@@ -111,6 +111,7 @@ class PreparedFinalEvaluation:
     output_dir: Path
     lock_path: Path
     provenance: Mapping[str, Any]
+    evaluation_id: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,7 +124,7 @@ class FinalEvaluationPreflightReport:
             "status": self.status,
             "config_path": str(self.prepared.config_path),
             "config_sha256": self.prepared.config_sha256,
-            "evaluation_id": self.prepared.output_dir.name,
+            "evaluation_id": self.prepared.evaluation_id,
             "output_dir": str(self.prepared.output_dir),
             "lock_path": str(self.prepared.lock_path),
             "test_data_accessed": False,
@@ -639,6 +640,7 @@ def _prepare_non_test_inputs(
             "classifier_metadata_paths": classifier_metadata_paths,
             "classifier_manifest_paths": classifier_manifest_paths,
         },
+        evaluation_id=config.evaluation_id,
     )
 
 
@@ -1439,6 +1441,10 @@ def run_final_evaluation(
             classifier_contexts=prepared.classifier_contexts,
             config=config,
         )
+        if _sha256(prepared.config_path) != prepared.config_sha256:
+            raise DataValidationError(
+                "frozen final evaluation configuration changed during inference"
+            )
         hashes_after = {name: _sha256(path) for name, path in checkpoint_paths.items()}
         if hashes_after != hashes_before:
             raise DataValidationError(
@@ -1452,7 +1458,12 @@ def run_final_evaluation(
         _write_json(staging_dir / "e2e_metrics.json", e2e_metrics)
         _write_json(staging_dir / "summary.json", summary)
         _write_json(staging_dir / "predictions.json", _prediction_payload(splits, result))
-        shutil.copy2(prepared.config_path, staging_dir / "frozen_config.yaml")
+        frozen_copy = staging_dir / "frozen_config.yaml"
+        shutil.copy2(prepared.config_path, frozen_copy)
+        if _sha256(frozen_copy) != prepared.config_sha256:
+            raise DataValidationError(
+                "published frozen final evaluation configuration SHA-256 is invalid"
+            )
         checkpoints = {
             name: {
                 "path": str(path),
