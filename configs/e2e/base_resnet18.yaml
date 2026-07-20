@@ -1,0 +1,7 @@
+dataset_root: datasets
+detector_config: configs/detector/yolo11n_base.yaml
+classifier_config: configs/classifier/resnet18_base.yaml
+detector_checkpoint: runs/detector/yolo11n_base_seed42/checkpoints/best.pt
+classifier_checkpoint: runs/classifier/resnet18_base_seed42/checkpoints/best.pt
+output_root: runs/e2e
+run_name: base_resnet18_seed42

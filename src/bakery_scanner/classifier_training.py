@@ -868,6 +868,65 @@ def _checkpoint_payload(
     }
 
 
+def _load_classifier_checkpoint_model(
+    checkpoint: Path,
+    *,
+    output_dimension: int,
+    checkpoint_context: Mapping[str, Any],
+    image_size: int,
+    device,
+):
+    import torch
+    from torch import nn
+    from torchvision.models import resnet18
+
+    try:
+        payload = torch.load(checkpoint, map_location="cpu", weights_only=True)
+    except (
+        OSError,
+        RuntimeError,
+        TypeError,
+        ValueError,
+        EOFError,
+        pickle.UnpicklingError,
+    ) as exc:
+        raise DataValidationError(
+            f"cannot load classifier checkpoint {checkpoint}: {exc}"
+        ) from exc
+    required = {
+        "checkpoint_version",
+        "architecture",
+        "output_dimension",
+        "image_size",
+        "epoch",
+        "validation_loss",
+        "model_state_dict",
+        "optimizer_state_dict",
+        "context",
+    }
+    if not isinstance(payload, dict) or set(payload) != required:
+        raise DataValidationError("classifier checkpoint schema is invalid")
+    if (
+        payload["checkpoint_version"] != 1
+        or payload["architecture"] != "resnet18"
+        or payload["output_dimension"] != output_dimension
+        or payload["image_size"] != image_size
+        or payload["context"] != dict(checkpoint_context)
+    ):
+        raise DataValidationError(
+            "classifier checkpoint context does not match evaluation configuration"
+        )
+    model = resnet18(weights=None)
+    model.fc = nn.Linear(model.fc.in_features, output_dimension)
+    try:
+        model.load_state_dict(payload["model_state_dict"], strict=True)
+    except (RuntimeError, TypeError) as exc:
+        raise DataValidationError(
+            f"cannot strict-load classifier checkpoint: {exc}"
+        ) from exc
+    return model.to(device).eval()
+
+
 class TorchvisionClassifierBackend:
     def cuda_available(self, device: str) -> bool:
         import torch
@@ -1069,59 +1128,19 @@ class TorchvisionClassifierBackend:
         arguments: Mapping[str, object],
     ) -> Sequence[ClassifierPrediction]:
         import torch
-        from torch import nn
         from torch.utils.data import DataLoader
-        from torchvision.models import resnet18
 
         device = _torch_device(arguments.get("device"))
         image_size = _argument_integer(arguments, "image_size")
         batch_size = _argument_integer(arguments, "batch_size")
         workers = _argument_integer(arguments, "workers", allow_zero=True)
-        try:
-            payload = torch.load(checkpoint, map_location="cpu", weights_only=True)
-        except (
-            OSError,
-            RuntimeError,
-            TypeError,
-            ValueError,
-            EOFError,
-            pickle.UnpicklingError,
-        ) as exc:
-            raise DataValidationError(
-                f"cannot load classifier checkpoint {checkpoint}: {exc}"
-            ) from exc
-        required = {
-            "checkpoint_version",
-            "architecture",
-            "output_dimension",
-            "image_size",
-            "epoch",
-            "validation_loss",
-            "model_state_dict",
-            "optimizer_state_dict",
-            "context",
-        }
-        if not isinstance(payload, dict) or set(payload) != required:
-            raise DataValidationError("classifier checkpoint schema is invalid")
-        if (
-            payload["checkpoint_version"] != 1
-            or payload["architecture"] != "resnet18"
-            or payload["output_dimension"] != output_dimension
-            or payload["image_size"] != image_size
-            or payload["context"] != dict(checkpoint_context)
-        ):
-            raise DataValidationError(
-                "classifier checkpoint context does not match evaluation configuration"
-            )
-        model = resnet18(weights=None)
-        model.fc = nn.Linear(model.fc.in_features, output_dimension)
-        try:
-            model.load_state_dict(payload["model_state_dict"], strict=True)
-        except (RuntimeError, TypeError) as exc:
-            raise DataValidationError(
-                f"cannot strict-load classifier checkpoint: {exc}"
-            ) from exc
-        model.to(device).eval()
+        model = _load_classifier_checkpoint_model(
+            checkpoint,
+            output_dimension=output_dimension,
+            checkpoint_context=checkpoint_context,
+            image_size=image_size,
+            device=device,
+        )
         _train_transform, validation_transform = _classifier_transforms(image_size)
         loader = DataLoader(
             _ManifestImageDataset(samples, validation_transform),

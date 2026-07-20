@@ -2,7 +2,7 @@
 
 고정 카메라로 촬영한 트레이 이미지에서 여러 빵의 위치와 종류를 식별하고, 신규 빵 클래스를 추가했을 때 기존 성능이 얼마나 유지되는지 검증하는 프로젝트입니다.
 
-현재 저장소에는 데이터셋 무결성 검사, COCO 검증, 학습 경로 안전장치, scene 단위 split, detector용 합성 장면 생성·replay 검증, YOLO 데이터 변환과 YOLO11n detector 학습·train-side 평가, Base 15-class와 Incremental 20-class classifier 학습 데이터 조립·검증, Base ResNet18 classifier 학습·train-side 평가가 구현되어 있습니다. End-to-end 추론은 아직 구현되지 않았습니다.
+현재 저장소에는 데이터셋 무결성 검사, COCO 검증, 학습 경로 안전장치, scene 단위 split, detector용 합성 장면 생성·replay 검증, YOLO 데이터 변환과 YOLO11n detector 학습·train-side 평가, Base 15-class와 Incremental 20-class classifier 학습 데이터 조립·검증, Base ResNet18 classifier 학습·train-side 평가와 Base end-to-end 추론·평가가 구현되어 있습니다.
 
 ## 목표
 
@@ -352,6 +352,32 @@ bakery-classifier evaluate `
 두 subcommand 모두 `--json`을 지원합니다. 이 평가는 test 성능이 아니며 Base
 또는 Incremental test를 checkpoint 선택, threshold, hyperparameter나 설정
 선택에 사용하지 않습니다.
+
+## Base end-to-end 추론과 평가
+
+`bakery-e2e evaluate`는 고정된 YOLO11n bread detector와 Base ResNet18
+classifier를 결합합니다. Detector가 찾은 한 장면의 모든 bbox crop은 가능한
+경우 하나의 classifier batch로 처리하며, 결과는 bbox, `model_index`, detector
+신뢰도, classifier 신뢰도와 두 신뢰도의 곱을 포함합니다.
+
+```powershell
+bakery-e2e evaluate --config configs/e2e/base_resnet18.yaml
+```
+
+명령은 detector 학습 때 seed 42로 고정된 train-side validation scene group을
+detector manifest에서 가져옵니다. 모델 결과나 test split으로 평가 장면을
+선택하지 않습니다. 입력 manifest와 checkpoint SHA-256, classifier registry
+mapping·config를 검증하고 detector checkpoint가 추론 전후 바뀌지 않았는지
+확인한 뒤 `runs/e2e/<run-name>/`에 설정, metadata, 예측과 지표를 원자적으로
+저장합니다.
+
+지표는 class-aware 101-point mAP50, mAP50:95와 클래스별 이미지 단위 exact
+count accuracy입니다. AP는 detector confidence floor `0.001` 이상의 전체
+예측으로 계산하고, exact-count에는 운영 confidence `0.25`를 적용합니다.
+기본 실제 run은 `scene_e/h/m_0509` 3장, 정답 15개를 사용한 train-side
+기준선이며 mAP50 `0.534653`, mAP50:95 `0.476370`, 지원
+클래스 Macro exact-count accuracy `0.466667`입니다. 이 값은 test 또는 특정
+POS 장치 성능이 아닙니다. `--json`도 지원합니다.
 
 ## 데이터 audit
 
