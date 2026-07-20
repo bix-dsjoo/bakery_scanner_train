@@ -331,7 +331,7 @@ git commit -m "feat(classifier): Incremental 학습과 detector 고정을 검증
 **Interfaces:**
 - Produces: approved real 20-output checkpoint and train-side metrics for later Incremental E2E and CPU benchmark stages.
 
-- [ ] **Step 1: Replay-validate the actual Incremental classifier dataset**
+- [x] **Step 1: Replay-validate the actual Incremental classifier dataset**
 
 Run:
 
@@ -341,11 +341,11 @@ bakery-classifier-data validate --dataset-root datasets --run-name incremental_s
 
 Require output dimension 20, all model indices 0 through 19, no test path, and deterministic replay equality.
 
-- [ ] **Step 2: Verify source artifacts before training**
+- [x] **Step 2: Verify source artifacts before training**
 
 Check the Base classifier checkpoint hash against its metadata and the detector checkpoint hash against its metadata. Record both hashes in the work log.
 
-- [ ] **Step 3: Execute the CUDA Incremental run once**
+- [x] **Step 3: Execute the CUDA Incremental run once**
 
 Run:
 
@@ -355,15 +355,15 @@ bakery-classifier train --config configs/classifier/resnet18_incremental.yaml --
 
 Do not inspect any test result. If the command fails for an implementation defect, fix under TDD and restart to a new run name; do not overwrite a completed run.
 
-- [ ] **Step 4: Independently replay train-side metrics and provenance**
+- [x] **Step 4: Independently replay train-side metrics and provenance**
 
 Recompute predictions/metrics from `best.pt`, compare the JSON payload exactly, verify first-15 mapping, 20-output shape, Base/new group metrics, class counts/weights, and unchanged detector hash.
 
-- [ ] **Step 5: Record measured train-side results**
+- [x] **Step 5: Record measured train-side results**
 
 Update README with the actual overall Top-1/Macro F1 and Base/new group values. Label them train-side and do not claim CPU/POS performance.
 
-- [ ] **Step 6: Final local verification**
+- [x] **Step 6: Final local verification**
 
 Run full tests, compileall, diff-check, config safety checks, detector hash checks, and tracked-worktree status. Preserve ignored datasets and runs.
 

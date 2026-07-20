@@ -2,7 +2,7 @@
 
 고정 카메라로 촬영한 트레이 이미지에서 여러 빵의 위치와 종류를 식별하고, 신규 빵 클래스를 추가했을 때 기존 성능이 얼마나 유지되는지 검증하는 프로젝트입니다.
 
-현재 저장소에는 데이터셋 무결성 검사, COCO 검증, 학습 경로 안전장치, scene 단위 split, detector용 합성 장면 생성·replay 검증, YOLO 데이터 변환과 YOLO11n detector 학습·train-side 평가, Base 15-class와 Incremental 20-class classifier 학습 데이터 조립·검증, Base ResNet18 classifier 학습·train-side 평가와 Base end-to-end 추론·평가가 구현되어 있습니다.
+현재 저장소에는 데이터셋 무결성 검사, COCO 검증, 학습 경로 안전장치, scene 단위 split, detector용 합성 장면 생성·replay 검증, YOLO 데이터 변환과 YOLO11n detector 학습·train-side 평가, Base 15-class와 Incremental 20-class classifier 학습 데이터 조립·검증, Base 및 Incremental ResNet18 classifier 학습·train-side 평가와 Base end-to-end 추론·평가가 구현되어 있습니다.
 
 ## 목표
 
@@ -378,6 +378,14 @@ F1·클래스별 Precision/Recall/F1 외에 Base 15개와 신규 5개 클래스 
 이 명령은 train-side 데이터만 사용합니다. Base/Incremental test 결과로
 checkpoint, early stopping, hyperparameter 또는 모델을 선택하지 않으며 CPU나
 특정 POS 장치 성능을 나타내지 않습니다.
+
+기본 실제 run은 best epoch 5, 총 10 epoch에서 종료됐습니다. 고정 train-side
+validation 20개 crop에서 전체 Top-1 `0.650000`, Macro F1 `0.470000`, Base 그룹
+Top-1 `0.800000`·Macro F1 `0.860000`, 신규 그룹 Top-1 `0.200000`·Macro F1
+`0.080000`입니다. 신규 그룹은 클래스당 validation 1장뿐이므로 이 값은 초기
+기준선으로만 해석합니다. 학습 전후 detector SHA-256은
+`ca109b8a3cebb92c31a11d0b82dd532e9943e59a0e009095bfaada106c0e151b`로
+동일합니다.
 
 ## Base end-to-end 추론과 평가
 
