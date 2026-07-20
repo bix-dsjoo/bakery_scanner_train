@@ -353,6 +353,32 @@ bakery-classifier evaluate `
 또는 Incremental test를 checkpoint 선택, threshold, hyperparameter나 설정
 선택에 사용하지 않습니다.
 
+## Incremental 20-class classifier 학습과 검증
+
+`resnet18_incremental.yaml`은 승인된 Base classifier checkpoint를 20개
+출력으로 확장합니다. Backbone과 기존 `model_index` 0~14의 head 가중치·bias를
+정확히 복사하고 신규 15~19 출력만 seed 42 초기값을 사용합니다. 검증된
+`incremental_seed42` manifest의 Base 데이터를 함께 재사용하며, 각 클래스의
+train 샘플 수에 반비례하는 loss weight를 적용합니다.
+
+```powershell
+bakery-classifier train --config configs/classifier/resnet18_incremental.yaml
+
+bakery-classifier evaluate `
+  --config configs/classifier/resnet18_incremental.yaml `
+  --checkpoint runs/classifier/resnet18_incremental_seed42/checkpoints/best.pt
+```
+
+학습 전 Base checkpoint 계보와 detector metadata를 검증하고, classifier 학습과
+best-checkpoint 평가 전후의 detector SHA-256이 같지 않으면 run을 실패시킵니다.
+Detector는 classifier backend에 전달되지 않습니다. 결과에는 전체 Top-1·Macro
+F1·클래스별 Precision/Recall/F1 외에 Base 15개와 신규 5개 클래스 그룹 지표,
+클래스별 train count와 실제 loss weight를 기록합니다.
+
+이 명령은 train-side 데이터만 사용합니다. Base/Incremental test 결과로
+checkpoint, early stopping, hyperparameter 또는 모델을 선택하지 않으며 CPU나
+특정 POS 장치 성능을 나타내지 않습니다.
+
 ## Base end-to-end 추론과 평가
 
 `bakery-e2e evaluate`는 고정된 YOLO11n bread detector와 Base ResNet18

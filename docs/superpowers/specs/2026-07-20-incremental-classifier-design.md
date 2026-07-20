@@ -78,7 +78,9 @@ the exact loss weight used by the backend. For each present class:
 
 `weight[index] = train_sample_count / (20 * class_sample_count[index])`
 
-All 20 classes must be present in train and validation. Missing support is an
+All 20 classes must be present in train. Incremental validation must contain
+all five new classes; Base validation support follows the fixed scene group
+and can cover a subset of the 15 Base classes. A missing train class is an
 error rather than a zero weight or warning.
 
 The classifier dataset builder must perform path-safety validation before it

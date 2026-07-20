@@ -132,7 +132,8 @@ assert metrics["phase"]["base"] == {
 assert metrics["phase"]["incremental"]["sample_count"] == 2
 ```
 
-For 15 outputs, require that `phase` contains only `base`. Reject an unsupported output dimension.
+For 15 outputs, require that `phase` contains only `base`. Other dimensions
+retain the generic metric payload without phase groups for unit-level reuse.
 
 - [x] **Step 3: Run the config and metric tests and confirm RED**
 
@@ -253,7 +254,7 @@ git commit -m "feat(classifier): Base checkpoint를 20개 출력으로 확장한
 - Produces: Incremental training metadata with detector before/after hashes and `detector_unchanged: true`.
 - Produces: atomic 20-output run artifacts using the existing layout.
 
-- [ ] **Step 1: Write failing frozen-detector orchestration tests**
+- [x] **Step 1: Write failing frozen-detector orchestration tests**
 
 Require path safety before dataset validation, adjacent detector metadata hash/class-name verification, hash capture before backend work, hash capture after best-checkpoint evaluation, cleanup on mutation, and metadata fields:
 
@@ -268,21 +269,24 @@ assert metadata["frozen_detector"] == {
 
 Assert the backend call has no detector object, detector path, or detector tensor argument.
 
-- [ ] **Step 2: Write failing Incremental dataset and checkpoint tests**
+- [x] **Step 2: Write failing Incremental dataset and checkpoint tests**
 
-Require phase `incremental`, output dimension 20, support for all 20 train/validation classes, Base checkpoint SHA and mapping validation, and complete run metadata. Reject a Base source run for Incremental config and an Incremental source run for Base config.
+Require phase `incremental`, output dimension 20, train support for all 20
+classes, validation support for all five new classes, Base checkpoint SHA and
+mapping validation, and complete run metadata. Reject a Base source run for
+Incremental config and an Incremental source run for Base config.
 
-- [ ] **Step 3: Run orchestration tests and confirm RED**
+- [x] **Step 3: Run orchestration tests and confirm RED**
 
 Run: `python -m pytest tests/test_classifier_training.py tests/test_classifier_train_cli.py -q`
 
 Expected: failures until Incremental dispatch and detector hashing exist.
 
-- [ ] **Step 4: Implement Incremental train/evaluate dispatch**
+- [x] **Step 4: Implement Incremental train/evaluate dispatch**
 
 Share atomic publication and `_write_evaluation`, but select phase-specific initialization and provenance. Hash the frozen detector before dataset reads and after evaluation. On any mismatch, raise `DataValidationError` and remove staging output.
 
-- [ ] **Step 5: Update README with only implemented commands**
+- [x] **Step 5: Update README with only implemented commands**
 
 Document:
 
@@ -295,7 +299,7 @@ bakery-classifier evaluate `
 
 State that Base data is replayed, the detector is frozen, all metrics are train-side, and no test or POS result is reported.
 
-- [ ] **Step 6: Run focused and full verification**
+- [x] **Step 6: Run focused and full verification**
 
 Run:
 
@@ -308,7 +312,7 @@ git diff --check
 
 Expected: all commands succeed.
 
-- [ ] **Step 7: Commit orchestration and docs**
+- [x] **Step 7: Commit orchestration and docs**
 
 ```powershell
 git add src/bakery_scanner/classifier_training.py tests/test_classifier_training.py README.md docs/superpowers/plans/2026-07-20-incremental-classifier.md
