@@ -143,7 +143,7 @@ Acceptance requires:
 
 - Incremental dataset replay validation succeeds with 20 contiguous outputs.
 - Base checkpoint expansion passes exact tensor-copy tests.
-- All 20 train and validation classes have support.
+- All 20 train classes and all five Incremental validation classes have support.
 - Full repository tests, compileall, and diff-check pass.
 - The real run publishes overall, Base-group, and Incremental-group metrics.
 - Detector SHA-256 is identical before and after the real run.

@@ -183,7 +183,7 @@ git commit -m "feat(classifier): Incremental 설정과 단계별 지표를 추�
 **Interfaces:**
 - Produces: `_build_incremental_resnet18(base_checkpoint, output_dimension, checkpoint_context, image_size)`.
 - Produces: `_balanced_class_statistics(train_samples, output_dimension) -> tuple[counts, weights]`.
-- Changes backend input name from `pretrained_model` to `initial_model` while keeping Base behavior identical.
+- Reuses the existing `pretrained_model` backend input for the validated Base checkpoint while keeping Base behavior identical.
 
 - [x] **Step 1: Write failing exact 15-to-20 expansion tests**
 
