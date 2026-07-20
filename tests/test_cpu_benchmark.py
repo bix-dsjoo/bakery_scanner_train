@@ -158,6 +158,44 @@ def test_validate_backend_result_requires_cpu_and_exact_measured_samples() -> No
             intra_op_threads=4,
             inter_op_threads=1,
         )
+
+
+def test_validate_backend_result_rejects_malformed_stages_batches_and_threads() -> None:
+    common = {
+        "image_ids": ("scene-a", "scene-b"),
+        "warmup_iterations": 2,
+        "repetitions": 3,
+        "intra_op_threads": 4,
+        "inter_op_threads": 1,
+    }
+    valid = _backend_result()
+    missing_stage = replace(
+        valid,
+        stage_samples_ms={
+            stage: values
+            for stage, values in valid.stage_samples_ms.items()
+            if stage != "postprocess"
+        },
+    )
+    with pytest.raises(DataValidationError, match="timing stages"):
+        _validate_backend_result(missing_stage, **common)
+
+    invalid_timing = replace(
+        valid,
+        stage_samples_ms={
+            **valid.stage_samples_ms,
+            "detector": (1.0, 2.0, 3.0, 4.0, 5.0, float("inf")),
+        },
+    )
+    with pytest.raises(DataValidationError, match="finite non-negative"):
+        _validate_backend_result(invalid_timing, **common)
+
+    with pytest.raises(DataValidationError, match="batch sizes"):
+        _validate_backend_result(
+            replace(valid, classifier_batch_sizes=(1, 2, 3, 4, 5, -1)), **common
+        )
+    with pytest.raises(DataValidationError, match="thread counts"):
+        _validate_backend_result(replace(valid, intra_op_threads=8), **common)
     with pytest.raises(DataValidationError, match="sample count"):
         _validate_backend_result(
             _backend_result(sample_count=4),

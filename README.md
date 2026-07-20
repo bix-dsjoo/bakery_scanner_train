@@ -137,6 +137,21 @@ ONNX backend를 추가할 경우 활성 provider가 오직 `CPUExecutionProvider
 검증해야 합니다. Base/Incremental test는 읽지 않으며, 결과는 현재 개발 PC의
 측정치일 뿐 특정 POS 장치의 성능을 의미하지 않습니다.
 
+2026-07-20 실제 기준선은 Intel Core Ultra 9 285K, PyTorch 2.13.0,
+detector 입력 640, classifier 입력 224, scene당 batch 5 조건에서 측정했습니다.
+3개 train-side 장면을 30회 반복한 90개 표본의 결과입니다.
+
+| 구간 | Mean (ms) | P50 (ms) | P95 (ms) |
+|---|---:|---:|---:|
+| Detector | 97.700 | 97.762 | 101.671 |
+| Crop·전처리 | 110.866 | 110.611 | 113.145 |
+| Classifier batch | 31.964 | 33.488 | 37.109 |
+| 후처리 | 0.021 | 0.020 | 0.023 |
+| End-to-end | 240.567 | 241.043 | 248.645 |
+
+이 수치는 현재 개발 PC에서 한 초기 기준선이며 하드웨어가 다른 POS 장치의
+latency로 해석할 수 없습니다.
+
 ## 프로젝트 구조
 
 ```text

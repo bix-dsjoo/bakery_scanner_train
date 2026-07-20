@@ -1,6 +1,6 @@
 # CPU-only End-to-End Benchmark Design
 
-**Date:** 2026-07-20  
+**Date:** 2026-07-20
 **Status:** Approved for implementation under the active complete-all-stages objective
 
 ## Goal

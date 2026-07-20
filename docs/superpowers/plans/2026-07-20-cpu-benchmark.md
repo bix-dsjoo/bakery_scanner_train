@@ -40,16 +40,16 @@ PyYAML, pytest.
 - Create: `src/bakery_scanner/cpu_benchmark.py`
 - Create: `tests/test_cpu_benchmark.py`
 
-- [ ] Write failing tests for exact config fields, positive warm-up/repetition
+- [x] Write failing tests for exact config fields, positive warm-up/repetition
   and thread values, valid run names, and rejection of unknown fields.
-- [ ] Implement immutable `CpuBenchmarkConfig` and
+- [x] Implement immutable `CpuBenchmarkConfig` and
   `load_cpu_benchmark_config()`.
-- [ ] Write failing tests for empty timing samples and deterministic linear
+- [x] Write failing tests for empty timing samples and deterministic linear
   interpolation at P50/P95.
-- [ ] Implement `_percentile()` and `_timing_statistics()` returning
+- [x] Implement `_percentile()` and `_timing_statistics()` returning
   count/mean/P50/P95 in milliseconds.
-- [ ] Run `python -m pytest tests/test_cpu_benchmark.py -q`.
-- [ ] Commit: `feat(benchmark): CPU 설정과 통계를 추가한다`.
+- [x] Run `python -m pytest tests/test_cpu_benchmark.py -q`.
+- [x] Commit: `feat(benchmark): CPU 설정과 통계를 추가한다`.
 
 ## Task 2: Safe orchestration and atomic reports
 
@@ -58,23 +58,23 @@ PyYAML, pytest.
 - Modify: `src/bakery_scanner/cpu_benchmark.py`
 - Modify: `tests/test_cpu_benchmark.py`
 
-- [ ] Add a fake backend and failing tests proving that unsafe/test paths are
+- [x] Add a fake backend and failing tests proving that unsafe/test paths are
   rejected before reads and that only train-side validation image paths are
   passed to the backend.
-- [ ] Reuse existing detector provenance validation and generic classifier
+- [x] Reuse existing detector provenance validation and generic classifier
   experiment loading/context validation. Require Incremental phase and 20
   outputs.
-- [ ] Define backend/result protocols with raw per-stage timing samples,
+- [x] Define backend/result protocols with raw per-stage timing samples,
   per-scene batch sizes, runtime, execution provider, and device declarations.
-- [ ] Add failing tests for any runtime other than PyTorch CPU, missing/extra
+- [x] Add failing tests for any runtime other than PyTorch CPU, missing/extra
   stages, incorrect sample counts, non-finite/negative samples, invalid batch
   counts, and mutated checkpoints.
-- [ ] Implement `run_cpu_benchmark()` with checkpoint before/after hashes,
+- [x] Implement `run_cpu_benchmark()` with checkpoint before/after hashes,
   strict result validation, statistics calculation, metadata, and atomic
   `config.yaml`/`benchmark.json`/`metadata.json` publication.
-- [ ] Add failing tests for backend exceptions and malformed results leaving no
+- [x] Add failing tests for backend exceptions and malformed results leaving no
   final or staging directory.
-- [ ] Run focused tests and commit:
+- [x] Run focused tests and commit:
   `feat(benchmark): CPU 실행 경계와 원자적 결과를 검증한다`.
 
 ## Task 3: Native PyTorch CPU backend
@@ -84,20 +84,20 @@ PyYAML, pytest.
 - Modify: `src/bakery_scanner/cpu_benchmark.py`
 - Modify: `tests/test_cpu_benchmark.py`
 
-- [ ] Write failing unit tests around an injected clock and fake
+- [x] Write failing unit tests around an injected clock and fake
   detector/classifier adapters to prove stage boundaries, warm-up exclusion,
   stable scene order, one classifier batch per non-empty scene, and empty
   detection handling.
-- [ ] Implement model loading with YOLO detector `device="cpu"`, strict
+- [x] Implement model loading with YOLO detector `device="cpu"`, strict
   classifier checkpoint context loading on `torch.device("cpu")`, and explicit
   CPU tensors.
-- [ ] Apply configured intra-op/inter-op threads before inference and record the
+- [x] Apply configured intra-op/inter-op threads before inference and record the
   effective values.
-- [ ] Time the five stages with `perf_counter_ns`; return raw measured samples
+- [x] Time the five stages with `perf_counter_ns`; return raw measured samples
   only and all observed classifier batch sizes.
-- [ ] Add adapter-level tests verifying detector arguments and classifier/tensor
+- [x] Add adapter-level tests verifying detector arguments and classifier/tensor
   devices are CPU.
-- [ ] Run focused tests and commit:
+- [x] Run focused tests and commit:
   `feat(benchmark): PyTorch CPU 추론 시간을 측정한다`.
 
 ## Task 4: CLI, default config, and documentation
@@ -110,16 +110,16 @@ PyYAML, pytest.
 - Modify: `pyproject.toml`
 - Modify: `README.md`
 
-- [ ] Write failing CLI tests for `run --config`, JSON output, error exit, and
+- [x] Write failing CLI tests for `run --config`, JSON output, error exit, and
   printed train-side/CPU selections.
-- [ ] Implement `bakery-benchmark` entry point without inventing any other
+- [x] Implement `bakery-benchmark` entry point without inventing any other
   command.
-- [ ] Add the strict default config with warm-up 5, repetitions 30, intra-op 4,
+- [x] Add the strict default config with warm-up 5, repetitions 30, intra-op 4,
   and inter-op 1.
-- [ ] Document the exact implemented command, timing definitions, CPU-only
+- [x] Document the exact implemented command, timing definitions, CPU-only
   enforcement, output schema, and non-POS limitation. State explicitly that the
   run does not access test data.
-- [ ] Run CLI/focused/full tests and commit:
+- [x] Run CLI/focused/full tests and commit:
   `docs(benchmark): CPU 기준선 명령을 문서화한다`.
 
 ## Task 5: Execute and verify the real benchmark
@@ -128,26 +128,26 @@ PyYAML, pytest.
 
 - Create: `runs/benchmark/incremental_resnet18_cpu/`
 
-- [ ] Replay detector and Incremental classifier dataset validation without
+- [x] Replay detector and Incremental classifier dataset validation without
   touching test paths.
-- [ ] Run:
+- [x] Run:
 
   ```powershell
   bakery-benchmark run --config configs/benchmark/incremental_resnet18_cpu.yaml
   ```
 
-- [ ] Independently recalculate every mean/P50/P95 value from raw samples and
+- [x] Independently recalculate every mean/P50/P95 value from raw samples and
   compare it with `benchmark.json`.
-- [ ] Verify exactly `30 * scene_count` samples per stage and that the five
+- [x] Verify exactly `30 * scene_count` samples per stage and that the five
   warm-up iterations are absent.
-- [ ] Verify metadata records PyTorch CPU execution, CPU model, thread counts,
+- [x] Verify metadata records PyTorch CPU execution, CPU model, thread counts,
   detector/classifier input sizes, observed batch sizes, versions, paths, and
   hashes.
-- [ ] Verify detector and classifier checkpoints are unchanged and the report
+- [x] Verify detector and classifier checkpoints are unchanged and the report
   contains no test path or POS-device claim.
-- [ ] Record the actual current-PC result in README without generalizing it to a
+- [x] Record the actual current-PC result in README without generalizing it to a
   POS device.
-- [ ] Run fresh completion verification:
+- [x] Run fresh completion verification:
 
   ```powershell
   python -m pytest -q
