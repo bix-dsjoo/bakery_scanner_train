@@ -11,7 +11,8 @@ dist/
 datasets/derived/synthetic/
 datasets/derived/detector/
 datasets/derived/yolo/
-runs/detector/
 
-# Downloaded and trained model weights are local artifacts.
+# Downloaded pretrained weights and completed detector runs are local artifacts.
+models/pretrained/
+runs/detector/
 *.pt

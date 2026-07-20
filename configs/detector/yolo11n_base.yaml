@@ -3,7 +3,7 @@ source_detector_run: base_seed42_detector_origin_aware
 yolo_run_name: base_seed42_detector_origin_aware_yolo
 output_root: runs/detector
 run_name: yolo11n_base_seed42
-model: yolo11n.pt
+model: models/pretrained/yolo11n.pt
 image_size: 640
 epochs: 50
 batch_size: 16

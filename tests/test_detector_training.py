@@ -52,6 +52,16 @@ def test_load_detector_training_config_accepts_baseline(tmp_path: Path) -> None:
     assert config.thresholds == EvaluationThresholds()
 
 
+def test_checked_in_baseline_uses_pretrained_model_directory() -> None:
+    repository_root = Path(__file__).resolve().parents[1]
+
+    config = load_detector_training_config(
+        repository_root / "configs" / "detector" / "yolo11n_base.yaml"
+    )
+
+    assert config.model == "models/pretrained/yolo11n.pt"
+
+
 @pytest.mark.parametrize(
     ("replacement", "message"),
     [

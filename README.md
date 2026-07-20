@@ -129,6 +129,7 @@ datasets/                         원본 및 프로젝트 데이터
   collected/scene_train/          추가 촬영한 실제 학습 장면
 src/bakery_scanner/               데이터 검증, split, 합성·detector 데이터와 CLI
 configs/detector/                 재현 가능한 detector 학습 설정
+models/pretrained/                다운로드한 사전학습 모델 가중치
 runs/detector/                    로컬 checkpoint, 예측, metric과 환경 metadata
 tests/                            pytest 자동 테스트
 docs/superpowers/specs/           승인된 설계 문서
@@ -237,7 +238,7 @@ datasets/derived/detector/base_seed42_detector_origin_aware/
 
 `bakery-detector train`은 설정에 지정된 detector COCO run을 먼저 독립 검증합니다. YOLO 파생 run이 없으면 `datasets/derived/yolo/`에 이미지·label·`data.yaml`·provenance manifest를 만들고, 이미 있으면 source hash, 전체 inventory, 이미지, label과 bbox를 다시 검증합니다. 원본 COCO와 기존 detector run은 수정하지 않습니다.
 
-기본 기준선은 `configs/detector/yolo11n_base.yaml`에 고정되어 있습니다. `yolo11n.pt`, 입력 크기 640, epoch 50, batch 16, seed 42, CUDA device 0과 train-side early stopping을 사용합니다.
+기본 기준선은 `configs/detector/yolo11n_base.yaml`에 고정되어 있습니다. `models/pretrained/yolo11n.pt`, 입력 크기 640, epoch 50, batch 16, seed 42, CUDA device 0과 train-side early stopping을 사용합니다. 다운로드한 사전학습 가중치는 `models/pretrained/`에 두며 Git에 포함하지 않습니다.
 
 ```powershell
 bakery-detector train --config configs/detector/yolo11n_base.yaml
