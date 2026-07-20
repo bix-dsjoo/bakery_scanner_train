@@ -316,11 +316,16 @@ def _validate_run_dir(
         for item in run_dir.rglob("*")
         if item.is_dir()
     }
-    if actual_files != expected_files or actual_dirs != expected_dirs:
+    runtime_cache_files = {
+        "train/labels.cache",
+        "validation/labels.cache",
+    }
+    inventory_files = actual_files - runtime_cache_files
+    if inventory_files != expected_files or actual_dirs != expected_dirs:
         raise DataValidationError(
             "YOLO output inventory mismatch: "
-            f"missing={sorted(expected_files - actual_files)}, "
-            f"extra={sorted(actual_files - expected_files)}"
+            f"missing={sorted(expected_files - inventory_files)}, "
+            f"extra={sorted(inventory_files - expected_files)}"
         )
 
     try:

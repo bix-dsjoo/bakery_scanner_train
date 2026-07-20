@@ -89,6 +89,19 @@ def test_validate_yolo_dataset_rejects_extra_output_file(
         validate_yolo_dataset(dataset_root, "extra-file")
 
 
+def test_validate_yolo_dataset_allows_ultralytics_label_caches(
+    detector_source_run: tuple[Path, str],
+) -> None:
+    dataset_root, source_run = detector_source_run
+    report = build_yolo_dataset(dataset_root, source_run, "ultralytics-cache")
+    for split in ("train", "validation"):
+        (report.output_dir / split / "labels.cache").write_bytes(b"runtime cache")
+
+    validated = validate_yolo_dataset(dataset_root, "ultralytics-cache")
+
+    assert validated.output_dir == report.output_dir
+
+
 def test_validate_yolo_dataset_rejects_changed_source_manifest(
     detector_source_run: tuple[Path, str],
 ) -> None:
