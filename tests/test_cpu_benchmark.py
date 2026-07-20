@@ -1,15 +1,22 @@
 from __future__ import annotations
 
+import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 import yaml
 
 from bakery_scanner.cpu_benchmark import (
+    BENCHMARK_STAGES,
+    CpuBackendResult,
     CpuBenchmarkConfig,
+    PreparedCpuBenchmark,
     _percentile,
     _timing_statistics,
+    _validate_backend_result,
     load_cpu_benchmark_config,
+    run_cpu_benchmark,
 )
 from bakery_scanner.errors import DataValidationError
 
@@ -90,3 +97,185 @@ def test_timing_statistics_rejects_empty_or_invalid_samples() -> None:
         _timing_statistics((1.0, float("nan")))
     with pytest.raises(DataValidationError, match="finite non-negative"):
         _timing_statistics((-0.1,))
+
+
+def _config_object(tmp_path: Path) -> CpuBenchmarkConfig:
+    payload = _payload()
+    payload.update(
+        {
+            "dataset_root": str(tmp_path / "datasets"),
+            "detector_config": str(tmp_path / "detector.yaml"),
+            "classifier_config": str(tmp_path / "classifier.yaml"),
+            "detector_checkpoint": str(tmp_path / "detector" / "best.pt"),
+            "classifier_checkpoint": str(tmp_path / "classifier" / "best.pt"),
+            "output_root": str(tmp_path / "runs" / "benchmark"),
+            "warmup_iterations": 2,
+            "repetitions": 3,
+        }
+    )
+    return CpuBenchmarkConfig(**payload)
+
+
+def _backend_result(*, sample_count: int = 6, provider: str = "CPU"):
+    return CpuBackendResult(
+        stage_samples_ms={
+            stage: tuple(float(index + 1) for index in range(sample_count))
+            for stage in BENCHMARK_STAGES
+        },
+        measured_image_ids=tuple(
+            image_id
+            for _ in range(sample_count // 2)
+            for image_id in ("scene-a", "scene-b")
+        ),
+        classifier_batch_sizes=tuple(range(sample_count)),
+        warmup_invocation_count=4,
+        runtime="pytorch",
+        execution_provider=provider,
+        device="cpu",
+        intra_op_threads=4,
+        inter_op_threads=1,
+    )
+
+
+def test_validate_backend_result_requires_cpu_and_exact_measured_samples() -> None:
+    _validate_backend_result(
+        _backend_result(),
+        image_ids=("scene-a", "scene-b"),
+        warmup_iterations=2,
+        repetitions=3,
+        intra_op_threads=4,
+        inter_op_threads=1,
+    )
+
+    with pytest.raises(DataValidationError, match="CPU execution provider"):
+        _validate_backend_result(
+            _backend_result(provider="CUDAExecutionProvider"),
+            image_ids=("scene-a", "scene-b"),
+            warmup_iterations=2,
+            repetitions=3,
+            intra_op_threads=4,
+            inter_op_threads=1,
+        )
+    with pytest.raises(DataValidationError, match="sample count"):
+        _validate_backend_result(
+            _backend_result(sample_count=4),
+            image_ids=("scene-a", "scene-b"),
+            warmup_iterations=2,
+            repetitions=3,
+            intra_op_threads=4,
+            inter_op_threads=1,
+        )
+
+
+class _RecordingBackend:
+    def __init__(self, result=None, *, mutate: Path | None = None, fail=False):
+        self.result = result or _backend_result()
+        self.mutate = mutate
+        self.fail = fail
+        self.call = None
+
+    def run(self, **kwargs):
+        self.call = kwargs
+        if self.mutate is not None:
+            self.mutate.write_bytes(b"mutated")
+        if self.fail:
+            raise RuntimeError("benchmark failed")
+        return self.result
+
+
+def _prepared(tmp_path: Path) -> PreparedCpuBenchmark:
+    detector_checkpoint = tmp_path / "detector" / "best.pt"
+    classifier_checkpoint = tmp_path / "classifier" / "best.pt"
+    detector_checkpoint.parent.mkdir(parents=True)
+    classifier_checkpoint.parent.mkdir(parents=True)
+    detector_checkpoint.write_bytes(b"detector")
+    classifier_checkpoint.write_bytes(b"classifier")
+    image_paths = (tmp_path / "scene-a.jpg", tmp_path / "scene-b.jpg")
+    for image_path in image_paths:
+        image_path.write_bytes(b"image")
+    return PreparedCpuBenchmark(
+        dataset_root=tmp_path / "datasets",
+        detector_config_path=tmp_path / "detector.yaml",
+        classifier_config_path=tmp_path / "classifier.yaml",
+        detector_checkpoint=detector_checkpoint,
+        classifier_checkpoint=classifier_checkpoint,
+        detector_metadata_path=tmp_path / "detector" / "metadata.json",
+        classifier_metadata_path=tmp_path / "classifier" / "metadata.json",
+        detector_manifest_path=tmp_path / "detector-manifest.json",
+        classifier_manifest_path=tmp_path / "classifier-manifest.json",
+        image_ids=("scene-a", "scene-b"),
+        image_paths=image_paths,
+        classifier_context={"fixture": True},
+        output_dimension=20,
+        detector_image_size=640,
+        classifier_image_size=224,
+        detector_confidence=0.25,
+        detector_nms_iou=0.7,
+        provenance={"fixture": True},
+    )
+
+
+def test_run_cpu_benchmark_publishes_atomic_cpu_report(
+    tmp_path: Path, monkeypatch
+) -> None:
+    config = _config_object(tmp_path)
+    prepared = _prepared(tmp_path)
+    monkeypatch.setattr(
+        "bakery_scanner.cpu_benchmark._prepare_cpu_benchmark",
+        lambda _config: prepared,
+    )
+    backend = _RecordingBackend()
+
+    report = run_cpu_benchmark(config, backend)
+
+    assert set(path.name for path in report.output_dir.iterdir()) == {
+        "benchmark.json",
+        "config.yaml",
+        "metadata.json",
+    }
+    payload = json.loads(report.benchmark_path.read_text(encoding="utf-8"))
+    assert payload["warmup_iterations"] == 2
+    assert payload["repetitions"] == 3
+    assert payload["scene_count"] == 2
+    assert payload["timings_ms"]["detector"]["count"] == 6
+    assert payload["raw_samples_ms"]["end_to_end"] == [1, 2, 3, 4, 5, 6]
+    metadata = json.loads(report.metadata_path.read_text(encoding="utf-8"))
+    assert metadata["runtime"]["device"] == "cpu"
+    assert metadata["runtime"]["execution_provider"] == "CPU"
+    assert metadata["limitations"]["pos_device_claim"] is False
+    assert backend.call["image_paths"] == prepared.image_paths
+
+
+@pytest.mark.parametrize("mode", ["mutate", "fail"])
+def test_run_cpu_benchmark_cleans_staging_on_failure(
+    tmp_path: Path, monkeypatch, mode: str
+) -> None:
+    config = _config_object(tmp_path)
+    prepared = _prepared(tmp_path)
+    monkeypatch.setattr(
+        "bakery_scanner.cpu_benchmark._prepare_cpu_benchmark",
+        lambda _config: prepared,
+    )
+    backend = _RecordingBackend(
+        mutate=prepared.detector_checkpoint if mode == "mutate" else None,
+        fail=mode == "fail",
+    )
+
+    expected = "checkpoint changed" if mode == "mutate" else "benchmark failed"
+    with pytest.raises((DataValidationError, RuntimeError), match=expected):
+        run_cpu_benchmark(config, backend)
+
+    output_root = Path(config.output_root)
+    assert not (output_root / config.run_name).exists()
+    assert not list(output_root.glob(f".{config.run_name}.tmp-*"))
+
+
+def test_run_cpu_benchmark_rejects_test_path_before_prepare(tmp_path: Path) -> None:
+    config = _config_object(tmp_path)
+    config = replace(
+        config,
+        detector_config=str(tmp_path / "datasets" / "base" / "test" / "x.yaml"),
+    )
+
+    with pytest.raises(DataValidationError, match="evaluation-only"):
+        run_cpu_benchmark(config, _RecordingBackend())
