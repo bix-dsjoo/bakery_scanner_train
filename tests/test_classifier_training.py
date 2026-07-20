@@ -17,8 +17,10 @@ from bakery_scanner.classifier_training import (
     BackendTrainingResult,
     ClassifierSample,
     ClassifierTrainingConfig,
+    IncrementalClassifierTrainingConfig,
     TorchvisionClassifierBackend,
     _build_resnet18,
+    load_classifier_experiment_config,
     load_classifier_training_config,
     train_classifier,
 )
@@ -132,6 +134,68 @@ def test_load_classifier_config_is_strict(tmp_path: Path) -> None:
     path.write_text(yaml.safe_dump(payload), encoding="utf-8")
     with pytest.raises(DataValidationError, match="fields"):
         load_classifier_training_config(path)
+
+
+def test_load_incremental_classifier_config_is_strict(tmp_path: Path) -> None:
+    payload = {
+        "phase": "incremental",
+        "dataset_root": "datasets",
+        "source_classifier_run": "incremental_seed42",
+        "output_root": "runs/classifier",
+        "run_name": "resnet18_incremental_seed42",
+        "architecture": "resnet18",
+        "base_checkpoint": "runs/classifier/resnet18_base_seed42/checkpoints/best.pt",
+        "frozen_detector_checkpoint": "runs/detector/yolo11n_base_seed42/checkpoints/best.pt",
+        "image_size": 224,
+        "epochs": 30,
+        "batch_size": 64,
+        "seed": 42,
+        "device": "0",
+        "patience": 5,
+        "workers": 8,
+        "learning_rate": 0.001,
+        "weight_decay": 0.0001,
+    }
+    path = tmp_path / "incremental.yaml"
+    path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+
+    config = load_classifier_experiment_config(path)
+
+    assert isinstance(config, IncrementalClassifierTrainingConfig)
+    assert config.phase == "incremental"
+    assert config.base_checkpoint.endswith("best.pt")
+
+    payload["unexpected"] = True
+    path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+    with pytest.raises(DataValidationError, match="fields"):
+        load_classifier_experiment_config(path)
+
+
+def test_experiment_loader_preserves_legacy_base_config(tmp_path: Path) -> None:
+    payload = {
+        "dataset_root": "datasets",
+        "source_classifier_run": "base_seed42",
+        "output_root": "runs/classifier",
+        "run_name": "resnet18_base_seed42",
+        "architecture": "resnet18",
+        "pretrained_model": "models/pretrained/resnet18-f37072fd.pth",
+        "image_size": 224,
+        "epochs": 30,
+        "batch_size": 64,
+        "seed": 42,
+        "device": "0",
+        "patience": 5,
+        "workers": 8,
+        "learning_rate": 0.001,
+        "weight_decay": 0.0001,
+    }
+    path = tmp_path / "base.yaml"
+    path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+
+    config = load_classifier_experiment_config(path)
+
+    assert isinstance(config, ClassifierTrainingConfig)
+    assert config == load_classifier_training_config(path)
 
 
 @pytest.mark.parametrize(

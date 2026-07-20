@@ -30,7 +30,7 @@
 - Consumes: `assert_training_paths_safe(paths, dataset_root)`.
 - Produces: `build_classifier_dataset(config)` that rejects a redirected scene COCO path before `_scene_payload()` reads it.
 
-- [ ] **Step 1: Write the failing pre-read safety test**
+- [x] **Step 1: Write the failing pre-read safety test**
 
 Add a test that monkeypatches `_scene_payload` to fail if called, redirects the configured scene COCO candidate under `datasets/base/test`, and asserts `DataValidationError` contains `evaluation-only`.
 
@@ -52,27 +52,26 @@ def test_build_classifier_dataset_checks_scene_coco_before_read(
         build_classifier_dataset(_config(dataset_root, "unsafe", "base"))
 ```
 
-- [ ] **Step 2: Run the focused test and confirm RED**
+- [x] **Step 2: Run the focused test and confirm RED**
 
 Run: `python -m pytest tests/test_classifier_dataset.py::test_build_classifier_dataset_checks_scene_coco_before_read -q`
 
 Expected: failure because `_scene_payload()` runs before the safety guard.
 
-- [ ] **Step 3: Move safety validation before the first COCO read**
+- [x] **Step 3: Move safety validation before the first COCO read**
 
 Resolve the registry, Base class directories, Incremental class directories when applicable, scene COCO, source images, and output root first. Call `assert_training_paths_safe` before `_scene_payload(scene_coco)`. Do not weaken the later complete-path validation.
 
-- [ ] **Step 4: Run dataset tests**
+- [x] **Step 4: Run dataset tests**
 
 Run: `python -m pytest tests/test_classifier_dataset.py tests/test_classifier_data_cli.py -q`
 
 Expected: all tests pass, including deterministic Base and Incremental replay validation.
 
-- [ ] **Step 5: Commit the safety fix**
+- [x] **Step 5: Confirm the safety fix already exists on latest main**
 
 ```powershell
-git add src/bakery_scanner/classifier_dataset.py tests/test_classifier_dataset.py
-git commit -m "fix(classifier): 장면 COCO 접근 전에 경로를 검증한다"
+git show c0dbe327 -- src/bakery_scanner/classifier_dataset.py tests/test_classifier_dataset.py
 ```
 
 ---
@@ -94,7 +93,7 @@ git commit -m "fix(classifier): 장면 COCO 접근 전에 경로를 검증한다
 - Produces: `evaluate_classifier_predictions(...)["phase"]` for 20-output runs.
 - Preserves: `_config_payload(ClassifierTrainingConfig)` exactly, so the approved Base checkpoint context remains unchanged.
 
-- [ ] **Step 1: Write failing strict-config compatibility tests**
+- [x] **Step 1: Write failing strict-config compatibility tests**
 
 Test that the existing Base YAML still loads as `ClassifierTrainingConfig` with the exact legacy payload. Test an Incremental YAML with these exact fields:
 
@@ -120,7 +119,7 @@ weight_decay: 0.0001
 
 Reject missing, extra, empty, non-Incremental phase, CPU device, and test-path artifact values.
 
-- [ ] **Step 2: Write failing phase metric tests**
+- [x] **Step 2: Write failing phase metric tests**
 
 Use 20 outputs with correct and incorrect predictions in both ranges. Require:
 
@@ -135,13 +134,13 @@ assert metrics["phase"]["incremental"]["sample_count"] == 2
 
 For 15 outputs, require that `phase` contains only `base`. Reject an unsupported output dimension.
 
-- [ ] **Step 3: Run the config and metric tests and confirm RED**
+- [x] **Step 3: Run the config and metric tests and confirm RED**
 
 Run: `python -m pytest tests/test_classifier_training.py tests/test_classifier_evaluation.py tests/test_classifier_train_cli.py -q`
 
 Expected: failures for missing Incremental config types/loader and phase metrics.
 
-- [ ] **Step 4: Implement the separate schema and grouped metrics**
+- [x] **Step 4: Implement the separate schema and grouped metrics**
 
 Keep `ClassifierTrainingConfig` and its field order unchanged. Add a separate field order and serializer for `IncrementalClassifierTrainingConfig`. Dispatch only when the YAML contains `phase: incremental`; otherwise call the legacy loader.
 
@@ -155,17 +154,17 @@ if output_dimension == 20:
 
 Top-1 uses only samples whose target is in the group. Macro F1 averages every registry class in the group, including a zero F1 class.
 
-- [ ] **Step 5: Route CLI train/evaluate through the experiment loader**
+- [x] **Step 5: Route CLI train/evaluate through the experiment loader**
 
 The CLI must print `Classifier phase: base` or `Classifier phase: incremental` before backend work. Preserve the existing command names and JSON/human output contracts.
 
-- [ ] **Step 6: Run focused tests**
+- [x] **Step 6: Run focused tests**
 
 Run: `python -m pytest tests/test_classifier_evaluation.py tests/test_classifier_training.py tests/test_classifier_train_cli.py -q`
 
 Expected: all focused tests pass and Base config serialization assertions remain unchanged.
 
-- [ ] **Step 7: Commit config and metric support**
+- [x] **Step 7: Commit config and metric support**
 
 ```powershell
 git add src/bakery_scanner/classifier_training.py src/bakery_scanner/classifier_evaluation.py src/bakery_scanner/classifier_train_cli.py tests/test_classifier_training.py tests/test_classifier_evaluation.py tests/test_classifier_train_cli.py configs/classifier/resnet18_incremental.yaml

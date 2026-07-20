@@ -1,0 +1,17 @@
+phase: incremental
+dataset_root: datasets
+source_classifier_run: incremental_seed42
+output_root: runs/classifier
+run_name: resnet18_incremental_seed42
+architecture: resnet18
+base_checkpoint: runs/classifier/resnet18_base_seed42/checkpoints/best.pt
+frozen_detector_checkpoint: runs/detector/yolo11n_base_seed42/checkpoints/best.pt
+image_size: 224
+epochs: 30
+batch_size: 64
+seed: 42
+device: "0"
+patience: 5
+workers: 8
+learning_rate: 0.001
+weight_decay: 0.0001

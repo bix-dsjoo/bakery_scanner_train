@@ -49,6 +49,26 @@ _CONFIG_FIELD_ORDER = (
     "weight_decay",
 )
 _CONFIG_FIELDS = set(_CONFIG_FIELD_ORDER)
+_INCREMENTAL_CONFIG_FIELD_ORDER = (
+    "phase",
+    "dataset_root",
+    "source_classifier_run",
+    "output_root",
+    "run_name",
+    "architecture",
+    "base_checkpoint",
+    "frozen_detector_checkpoint",
+    "image_size",
+    "epochs",
+    "batch_size",
+    "seed",
+    "device",
+    "patience",
+    "workers",
+    "learning_rate",
+    "weight_decay",
+)
+_INCREMENTAL_CONFIG_FIELDS = set(_INCREMENTAL_CONFIG_FIELD_ORDER)
 _PREPROCESSING_METADATA = {
     "train": [
         "RandomResizedCrop(scale=[0.8,1.0])",
@@ -76,6 +96,27 @@ class ClassifierTrainingConfig:
     run_name: str
     architecture: str
     pretrained_model: str
+    image_size: int
+    epochs: int
+    batch_size: int
+    seed: int
+    device: str
+    patience: int
+    workers: int
+    learning_rate: float
+    weight_decay: float
+
+
+@dataclass(frozen=True, slots=True)
+class IncrementalClassifierTrainingConfig:
+    phase: str
+    dataset_root: str
+    source_classifier_run: str
+    output_root: str
+    run_name: str
+    architecture: str
+    base_checkpoint: str
+    frozen_detector_checkpoint: str
     image_size: int
     epochs: int
     batch_size: int
@@ -247,6 +288,59 @@ def load_classifier_training_config(path: str | Path) -> ClassifierTrainingConfi
         run_name=_run_name(payload["run_name"], "run_name"),
         architecture=architecture,
         pretrained_model=_text(payload["pretrained_model"], "pretrained_model"),
+        image_size=_integer(payload["image_size"], "image_size"),
+        epochs=_integer(payload["epochs"], "epochs"),
+        batch_size=_integer(payload["batch_size"], "batch_size"),
+        seed=_integer(payload["seed"], "seed", allow_zero=True),
+        device=device,
+        patience=_integer(payload["patience"], "patience", allow_zero=True),
+        workers=_integer(payload["workers"], "workers", allow_zero=True),
+        learning_rate=_number(payload["learning_rate"], "learning_rate"),
+        weight_decay=_number(
+            payload["weight_decay"], "weight_decay", allow_zero=True
+        ),
+    )
+
+
+def load_classifier_experiment_config(
+    path: str | Path,
+) -> ClassifierTrainingConfig | IncrementalClassifierTrainingConfig:
+    config_path = Path(path)
+    try:
+        payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, yaml.YAMLError) as exc:
+        raise DataValidationError(
+            f"cannot load classifier config {config_path}: {exc}"
+        ) from exc
+    if not isinstance(payload, dict) or "phase" not in payload:
+        return load_classifier_training_config(config_path)
+    payload = _strict_object(
+        payload,
+        _INCREMENTAL_CONFIG_FIELDS,
+        "incremental classifier config",
+    )
+    if payload["phase"] != "incremental":
+        raise DataValidationError("incremental classifier phase must be incremental")
+    architecture = _text(payload["architecture"], "architecture")
+    if architecture != "resnet18":
+        raise DataValidationError("architecture must be resnet18 for this baseline")
+    device = _text(payload["device"], "device")
+    if device != "0":
+        raise DataValidationError("device must be CUDA device '0' for this baseline")
+    return IncrementalClassifierTrainingConfig(
+        phase="incremental",
+        dataset_root=_text(payload["dataset_root"], "dataset_root"),
+        source_classifier_run=_run_name(
+            payload["source_classifier_run"], "source_classifier_run"
+        ),
+        output_root=_text(payload["output_root"], "output_root"),
+        run_name=_run_name(payload["run_name"], "run_name"),
+        architecture=architecture,
+        base_checkpoint=_text(payload["base_checkpoint"], "base_checkpoint"),
+        frozen_detector_checkpoint=_text(
+            payload["frozen_detector_checkpoint"],
+            "frozen_detector_checkpoint",
+        ),
         image_size=_integer(payload["image_size"], "image_size"),
         epochs=_integer(payload["epochs"], "epochs"),
         batch_size=_integer(payload["batch_size"], "batch_size"),
