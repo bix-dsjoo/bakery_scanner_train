@@ -60,6 +60,7 @@ def test_build_base_dataset_maps_model_indices_and_preserves_scene_groups(
 
     manifest = json.loads(report.manifest_path.read_text(encoding="utf-8"))
     assert report.output_dimension == 15
+    assert manifest["config"]["dataset_root"] == "."
     assert manifest["registry"]["output_dimension"] == 15
     assert manifest["environment"]["dependencies"]["Pillow"] == PIL.__version__
     assert manifest["environment"]["python"]

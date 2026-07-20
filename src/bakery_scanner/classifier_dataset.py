@@ -492,6 +492,7 @@ def _manifest(
         "builder_version": BUILDER_VERSION,
         "environment": _environment_metadata(),
         "config": {
+            "dataset_root": ".",
             "run_name": config.run_name,
             "phase": config.phase,
             "seed": config.seed,
@@ -584,6 +585,7 @@ def _validate_run_dir(root: Path, run_name: str, run_dir: Path) -> ClassifierVal
         payload["config"],
         {
             "run_name",
+            "dataset_root",
             "phase",
             "seed",
             "validation_fraction",
@@ -592,6 +594,8 @@ def _validate_run_dir(root: Path, run_name: str, run_dir: Path) -> ClassifierVal
         },
         "classifier manifest config",
     )
+    if config_payload["dataset_root"] != ".":
+        raise DataValidationError("classifier manifest dataset_root must be '.'")
     config = ClassifierDatasetConfig(
         dataset_root=root,
         run_name=config_payload["run_name"],

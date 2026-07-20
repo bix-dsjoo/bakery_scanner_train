@@ -71,7 +71,9 @@ errors rather than silent overwrites.
   including normal images with no annotations;
 - per-split, per-class, per-phase, and per-source-kind counts.
 
-All stored paths are portable, dataset-root-relative POSIX paths. The validator
+The dataset root is recorded as `.` so the manifest defines the anchor without
+capturing a machine-specific absolute path. All stored paths are portable,
+dataset-root-relative POSIX paths. The validator
 rejects absolute paths, `..` traversal, test paths, unknown fields, duplicate
 records, non-contiguous output dimensions, or a category/model mapping that
 differs from the current registry.
