@@ -2,7 +2,7 @@
 
 고정 카메라로 촬영한 트레이 이미지에서 여러 빵의 위치와 종류를 식별하고, 신규 빵 클래스를 추가했을 때 기존 성능이 얼마나 유지되는지 검증하는 프로젝트입니다.
 
-현재 저장소에는 데이터셋 무결성 검사, COCO 검증, 학습 경로 안전장치, scene 단위 split, detector용 합성 장면 생성·replay 검증, YOLO 데이터 변환과 YOLO11n detector 학습·train-side 평가, Base 15-class와 Incremental 20-class classifier 학습 데이터 조립·검증이 구현되어 있습니다. Classifier 모델 학습과 end-to-end 추론은 아직 구현되지 않았습니다.
+현재 저장소에는 데이터셋 무결성 검사, COCO 검증, 학습 경로 안전장치, scene 단위 split, detector용 합성 장면 생성·replay 검증, YOLO 데이터 변환과 YOLO11n detector 학습·train-side 평가, Base 15-class와 Incremental 20-class classifier 학습 데이터 조립·검증, Base ResNet18 classifier 학습·train-side 평가가 구현되어 있습니다. End-to-end 추론은 아직 구현되지 않았습니다.
 
 ## 목표
 
@@ -321,6 +321,37 @@ COCO bbox, `category_id`와 `model_index`, split, validation 도메인과 클래
 표본 수, Python·platform·Pillow 버전을 기록합니다. Test 경로, 변조된
 원본·crop, 누락·추가 파일, Pillow replay 버전과 레지스트리 매핑 불일치는
 경고가 아니라 오류입니다.
+
+## Base 15-class classifier 학습과 검증
+
+`bakery-classifier train`은 검증된 `base_seed42` classifier 데이터만 입력으로
+사용해 ImageNet 사전학습 ResNet18 전체를 15개 출력으로 미세조정합니다. 기본
+설정은 입력 224, epoch 30, batch 64, seed 42, CUDA device 0이며 AdamW와
+클래스 빈도 보정 loss를 사용합니다. Best checkpoint와 early stopping은
+train-side validation loss로만 결정합니다.
+
+공식 torchvision 가중치 `resnet18-f37072fd.pth`를
+`models/pretrained/`에 준비한 뒤 실행합니다. 가중치와 `runs/classifier/`
+산출물은 Git에 포함되지 않습니다.
+
+```powershell
+bakery-classifier train --config configs/classifier/resnet18_base.yaml
+```
+
+완성된 run에는 설정, 환경·하드웨어·의존성, 입력 manifest와 가중치/checkpoint
+SHA-256, epoch history, validation 예측과 Top-1·Macro F1·클래스별
+Precision/Recall/F1이 기록됩니다. 저장된 checkpoint를 동일한 train-side
+validation에서 독립적으로 다시 평가할 수 있습니다.
+
+```powershell
+bakery-classifier evaluate `
+  --config configs/classifier/resnet18_base.yaml `
+  --checkpoint runs/classifier/resnet18_base_seed42/checkpoints/best.pt
+```
+
+두 subcommand 모두 `--json`을 지원합니다. 이 평가는 test 성능이 아니며 Base
+또는 Incremental test를 checkpoint 선택, threshold, hyperparameter나 설정
+선택에 사용하지 않습니다.
 
 ## 데이터 audit
 
