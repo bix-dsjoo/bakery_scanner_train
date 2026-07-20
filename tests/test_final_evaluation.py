@@ -26,6 +26,8 @@ from bakery_scanner.final_evaluation import (
     _create_start_lock,
     _load_locked_test_splits,
     _load_test_split,
+    _metrics,
+    _strict_validate_classifier_checkpoint,
     _update_start_lock,
     load_final_evaluation_config,
     preflight_final_evaluation,
@@ -197,6 +199,234 @@ def test_preflight_does_not_access_test_paths(tmp_path: Path, monkeypatch) -> No
     assert report.status == "ready"
     assert report.to_dict()["evaluation_id"] == "fixture_frozen_v1"
     assert accessed == []
+
+
+def test_preflight_rejects_config_object_file_mismatch(
+    tmp_path: Path, monkeypatch
+) -> None:
+    config_path = _write(tmp_path / "frozen.yaml", _payload())
+    config = load_final_evaluation_config(config_path)
+    changed = _payload()
+    changed["run_name"] = "different_frozen_run"
+    _write(config_path, changed)
+    monkeypatch.setattr(
+        "bakery_scanner.final_evaluation._prepare_non_test_inputs",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("prepare must not run")),
+    )
+
+    with pytest.raises(DataValidationError, match="object does not match"):
+        preflight_final_evaluation(
+            config, config_path, cuda_available=lambda _device: True
+        )
+
+
+def test_actual_preflight_never_touches_test_paths(tmp_path: Path, monkeypatch) -> None:
+    dataset_root = tmp_path / "datasets"
+    registry_path = dataset_root / "class_registry.json"
+    registry_path.parent.mkdir(parents=True)
+    registry_path.write_bytes(b"registry")
+    detector_config_path = tmp_path / "detector.yaml"
+    detector_config_path.write_bytes(b"detector config")
+    detector_checkpoint = tmp_path / "detector" / "checkpoints" / "best.pt"
+    detector_checkpoint.parent.mkdir(parents=True)
+    detector_checkpoint.write_bytes(b"detector checkpoint")
+    classifier_paths = {}
+    classifier_checkpoints = {}
+    for name in ("base", "incremental"):
+        classifier_paths[name] = tmp_path / f"{name}.yaml"
+        classifier_paths[name].write_bytes(f"{name} config".encode())
+        classifier_checkpoints[name] = (
+            tmp_path / name / "checkpoints" / "best.pt"
+        )
+        classifier_checkpoints[name].parent.mkdir(parents=True)
+        classifier_checkpoints[name].write_bytes(f"{name} checkpoint".encode())
+    detector_manifest = tmp_path / "detector-manifest.json"
+    yolo_manifest = tmp_path / "yolo-manifest.json"
+    base_manifest = tmp_path / "base-manifest.json"
+    incremental_manifest = tmp_path / "incremental-manifest.json"
+    for path in (detector_manifest, yolo_manifest, base_manifest, incremental_manifest):
+        path.write_text("{}", encoding="utf-8")
+
+    payload = _payload()
+    payload["dataset_root"] = str(dataset_root)
+    payload["registry"] = {
+        "path": str(registry_path),
+        "sha256": _sha(registry_path.read_bytes()),
+    }
+    payload["test_splits"] = {
+        "base": {
+            "coco_path": str(dataset_root / "base" / "test" / "instances_test.json"),
+            "expected_phase": "base",
+        },
+        "incremental": {
+            "coco_path": str(dataset_root / "incremental" / "test" / "instances_test.json"),
+            "expected_phase": "incremental",
+        },
+    }
+    payload["detector"].update(
+        config_path=str(detector_config_path),
+        config_sha256=_sha(detector_config_path.read_bytes()),
+        checkpoint=str(detector_checkpoint),
+        checkpoint_sha256=_sha(detector_checkpoint.read_bytes()),
+    )
+    for name, dimension in (("base", 15), ("incremental", 20)):
+        payload["classifiers"][name].update(
+            config_path=str(classifier_paths[name]),
+            config_sha256=_sha(classifier_paths[name].read_bytes()),
+            checkpoint=str(classifier_checkpoints[name]),
+            checkpoint_sha256=_sha(classifier_checkpoints[name].read_bytes()),
+            output_dimension=dimension,
+        )
+    payload["output_root"] = str(tmp_path / "runs" / "final")
+    config_path = _write(tmp_path / "frozen.yaml", payload)
+    config = load_final_evaluation_config(config_path)
+
+    thresholds = SimpleNamespace(
+        confidence_floor=0.001,
+        operating_confidence=0.25,
+        nms_iou=0.7,
+        matching_iou=0.5,
+    )
+    detector_config = SimpleNamespace(
+        dataset_root=str(dataset_root),
+        image_size=640,
+        thresholds=thresholds,
+        source_detector_run="detector-run",
+        yolo_run_name="yolo-run",
+    )
+    base_config = SimpleNamespace(
+        dataset_root=str(dataset_root),
+        image_size=224,
+        source_classifier_run="base-run",
+    )
+    incremental_config = SimpleNamespace(
+        dataset_root=str(dataset_root),
+        image_size=224,
+        source_classifier_run="incremental-run",
+    )
+    monkeypatch.setattr(
+        "bakery_scanner.registry.load_class_registry", lambda _path: object()
+    )
+    monkeypatch.setattr(
+        "bakery_scanner.detector_training.load_detector_training_config",
+        lambda _path: detector_config,
+    )
+    monkeypatch.setattr(
+        "bakery_scanner.detector_dataset.validate_detector_dataset",
+        lambda *_args: SimpleNamespace(manifest_path=detector_manifest),
+    )
+    monkeypatch.setattr(
+        "bakery_scanner.yolo_dataset.validate_yolo_dataset",
+        lambda *_args: SimpleNamespace(manifest_path=yolo_manifest),
+    )
+    monkeypatch.setattr(
+        "bakery_scanner.e2e_inference._validate_yolo_source_binding",
+        lambda *_args: None,
+    )
+    monkeypatch.setattr(
+        "bakery_scanner.e2e_inference._validate_detector_checkpoint_provenance",
+        lambda *_args: None,
+    )
+    monkeypatch.setattr(
+        "bakery_scanner.e2e_inference._checkpoint_metadata",
+        lambda checkpoint, _label: (
+            checkpoint.parent.parent / "metadata.json",
+            {},
+        ),
+    )
+    monkeypatch.setattr(
+        "bakery_scanner.classifier_training.load_classifier_experiment_config",
+        lambda path: base_config if Path(path) == classifier_paths["base"] else incremental_config,
+    )
+    monkeypatch.setattr(
+        "bakery_scanner.classifier_training._checkpoint_context",
+        lambda *_args: {"registry_sha256": "a" * 64, "model_index_mapping": []},
+    )
+    monkeypatch.setattr(
+        "bakery_scanner.classifier_dataset.validate_classifier_dataset",
+        lambda _root, run: SimpleNamespace(
+            phase="base" if run == "base-run" else "incremental",
+            output_dimension=15 if run == "base-run" else 20,
+            manifest_path=base_manifest if run == "base-run" else incremental_manifest,
+        ),
+    )
+    monkeypatch.setattr(
+        "bakery_scanner.final_evaluation._validate_classifier_metadata",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        "bakery_scanner.final_evaluation._strict_validate_classifier_checkpoint",
+        lambda **_kwargs: None,
+    )
+
+    forbidden_accesses = []
+    original_open = Path.open
+    original_is_file = Path.is_file
+    original_exists = Path.exists
+    original_iterdir = Path.iterdir
+
+    def guard(path: Path):
+        normalized = path.as_posix().casefold()
+        if "/base/test" in normalized or "/incremental/test" in normalized:
+            forbidden_accesses.append(normalized)
+            raise AssertionError("actual preflight touched test path")
+
+    def guarded_open(path, *args, **kwargs):
+        guard(path)
+        return original_open(path, *args, **kwargs)
+
+    def guarded_is_file(path):
+        guard(path)
+        return original_is_file(path)
+
+    def guarded_exists(path):
+        guard(path)
+        return original_exists(path)
+
+    def guarded_iterdir(path):
+        guard(path)
+        return original_iterdir(path)
+
+    monkeypatch.setattr(Path, "open", guarded_open)
+    monkeypatch.setattr(Path, "is_file", guarded_is_file)
+    monkeypatch.setattr(Path, "exists", guarded_exists)
+    monkeypatch.setattr(Path, "iterdir", guarded_iterdir)
+
+    report = preflight_final_evaluation(
+        config, config_path, cuda_available=lambda _device: True
+    )
+
+    assert report.status == "ready"
+    assert forbidden_accesses == []
+
+
+def test_strict_classifier_checkpoint_validation_uses_frozen_context(
+    tmp_path: Path
+) -> None:
+    calls = []
+
+    def loader(**kwargs):
+        calls.append(kwargs)
+        return object()
+
+    checkpoint = tmp_path / "best.pt"
+    _strict_validate_classifier_checkpoint(
+        checkpoint=checkpoint,
+        output_dimension=20,
+        checkpoint_context={"frozen": True},
+        image_size=224,
+        loader=loader,
+    )
+
+    assert calls == [
+        {
+            "checkpoint": checkpoint,
+            "output_dimension": 20,
+            "checkpoint_context": {"frozen": True},
+            "image_size": 224,
+            "device": "cpu",
+        }
+    ]
 
 
 def _synthetic_config(tmp_path: Path, dataset_root: Path) -> FinalEvaluationConfig:
@@ -624,3 +854,72 @@ def test_run_final_evaluation_rejects_config_mutation_during_inference(
     assert not prepared.output_dir.exists()
     lock = json.loads(prepared.lock_path.read_text(encoding="utf-8"))
     assert lock["status"] == "failed"
+
+
+def test_metrics_reject_ground_truth_classifier_target_drift(tmp_path: Path) -> None:
+    from bakery_scanner.classifier_evaluation import ClassifierPrediction
+
+    config = load_final_evaluation_config(_write(tmp_path / "frozen.yaml", _payload()))
+    splits = {
+        "base": _manual_split(tmp_path, "base", 3),
+        "incremental": _manual_split(tmp_path, "incremental", 16),
+    }
+    result = _perfect_backend_result(splits)
+    base_result = result.splits["base"]
+    wrong = ClassifierPrediction("base:sample", 4, 4, 0.8)
+    result = FinalInferenceResult(
+        {
+            **result.splits,
+            "base": replace(
+                base_result,
+                classifier_predictions={
+                    **base_result.classifier_predictions,
+                    "base": (wrong,),
+                },
+            ),
+        }
+    )
+
+    with pytest.raises(DataValidationError, match="COCO ground truth"):
+        _metrics(config, splits, result)
+
+
+def test_run_final_evaluation_rechecks_hashes_immediately_before_publish(
+    tmp_path: Path, monkeypatch
+) -> None:
+    config_path = _write(tmp_path / "frozen.yaml", _payload())
+    config = load_final_evaluation_config(config_path)
+    prepared = _prepared(tmp_path)
+    for checkpoint in (
+        prepared.detector_checkpoint,
+        *prepared.classifier_checkpoints.values(),
+    ):
+        checkpoint.parent.mkdir(parents=True, exist_ok=True)
+        checkpoint.write_bytes(checkpoint.name.encode())
+    monkeypatch.setattr(
+        "bakery_scanner.final_evaluation.preflight_final_evaluation",
+        lambda *_args, **_kwargs: FinalEvaluationPreflightReport(prepared),
+    )
+    monkeypatch.setattr(
+        "bakery_scanner.final_evaluation._load_test_split",
+        lambda _config, _prepared, name: _manual_split(
+            tmp_path, name, 3 if name == "base" else 16
+        ),
+    )
+
+    class Backend:
+        def predict(self, **kwargs):
+            return _perfect_backend_result(kwargs["splits"])
+
+    def mutate_after_validation(_output_dir):
+        prepared.classifier_checkpoints["base"].write_bytes(b"late mutation")
+
+    monkeypatch.setattr(
+        "bakery_scanner.final_evaluation._validate_completed_output",
+        mutate_after_validation,
+    )
+    with pytest.raises(DataValidationError, match="immediately before publication"):
+        run_final_evaluation(config, config_path, Backend())
+
+    assert not prepared.output_dir.exists()
+    assert json.loads(prepared.lock_path.read_text(encoding="utf-8"))["status"] == "failed"

@@ -482,6 +482,28 @@ def _validate_classifier_metadata(
             )
 
 
+def _strict_validate_classifier_checkpoint(
+    *,
+    checkpoint: Path,
+    output_dimension: int,
+    checkpoint_context: Mapping[str, Any],
+    image_size: int,
+    loader: Callable[..., Any] | None = None,
+) -> None:
+    if loader is None:
+        from .classifier_training import _load_classifier_checkpoint_model
+
+        loader = _load_classifier_checkpoint_model
+    model = loader(
+        checkpoint=checkpoint,
+        output_dimension=output_dimension,
+        checkpoint_context=checkpoint_context,
+        image_size=image_size,
+        device="cpu",
+    )
+    del model
+
+
 def _prepare_non_test_inputs(
     config: FinalEvaluationConfig,
     config_path: Path,
@@ -604,6 +626,12 @@ def _prepare_non_test_inputs(
             detector_checkpoint=detector_checkpoint,
             detector_hash=config.detector.checkpoint_sha256,
         )
+        _strict_validate_classifier_checkpoint(
+            checkpoint=checkpoint,
+            output_dimension=frozen.output_dimension,
+            checkpoint_context=context,
+            image_size=frozen.image_size,
+        )
         classifier_config_paths[name] = selected_path
         classifier_checkpoints[name] = checkpoint
         classifier_contexts[name] = context
@@ -652,9 +680,14 @@ def preflight_final_evaluation(
 ) -> FinalEvaluationPreflightReport:
     if not isinstance(config, FinalEvaluationConfig):
         raise DataValidationError("config must be FinalEvaluationConfig")
+    config_path = Path(config_path)
+    if load_final_evaluation_config(config_path) != config:
+        raise DataValidationError(
+            "final evaluation config object does not match config_path bytes"
+        )
     prepared = _prepare_non_test_inputs(
         config,
-        Path(config_path),
+        config_path,
         cuda_available or _cuda_available,
     )
     return FinalEvaluationPreflightReport(prepared)
@@ -1244,6 +1277,19 @@ def _metrics(
         for model_name in relevant:
             key = f"{model_name}_model_on_{split_name}_test"
             output_dimension = config.classifiers[model_name].output_dimension
+            expected_truth = tuple(
+                (obj.sample_id, obj.model_index)
+                for image in splits[split_name].images
+                for obj in image.objects
+            )
+            actual_truth = tuple(
+                (item.sample_id, item.target_index)
+                for item in split_result.classifier_predictions[model_name]
+            )
+            if actual_truth != expected_truth:
+                raise DataValidationError(
+                    f"{key} classifier predictions do not match COCO ground truth"
+                )
             classifier_metrics[key] = evaluate_classifier_predictions(
                 split_result.classifier_predictions[model_name],
                 output_dimension=output_dimension,
@@ -1545,6 +1591,17 @@ def run_final_evaluation(
             _report_markdown(summary), encoding="utf-8"
         )
         _validate_completed_output(staging_dir)
+        final_hashes = {
+            name: _sha256(path) for name, path in checkpoint_paths.items()
+        }
+        if (
+            _sha256(prepared.config_path) != prepared.config_sha256
+            or _sha256(frozen_copy) != prepared.config_sha256
+            or final_hashes != hashes_before
+        ):
+            raise DataValidationError(
+                "frozen configuration or checkpoint changed immediately before publication"
+            )
         staging_dir.rename(prepared.output_dir)
         _update_start_lock(prepared, status="completed")
         return FinalEvaluationReport(
