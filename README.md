@@ -2,7 +2,7 @@
 
 고정 카메라로 촬영한 트레이 이미지에서 여러 빵의 위치와 종류를 식별하고, 신규 빵 클래스를 추가했을 때 기존 성능이 얼마나 유지되는지 검증하는 프로젝트입니다.
 
-현재 저장소에는 데이터셋 무결성 검사, COCO 검증, 학습 경로 안전장치, scene 단위 split, detector용 합성 장면 생성·replay 검증, YOLO 데이터 변환과 YOLO11n detector 학습·train-side 평가가 구현되어 있습니다. Classifier와 end-to-end 추론은 아직 구현되지 않았습니다.
+현재 저장소에는 데이터셋 무결성 검사, COCO 검증, 학습 경로 안전장치, scene 단위 split, detector용 합성 장면 생성·replay 검증, YOLO 데이터 변환과 YOLO11n detector 학습·train-side 평가, Base 15-class와 Incremental 20-class classifier 학습 데이터 조립·검증이 구현되어 있습니다. Classifier 모델 학습과 end-to-end 추론은 아직 구현되지 않았습니다.
 
 ## 목표
 
@@ -125,9 +125,10 @@ datasets/                         원본 및 프로젝트 데이터
   derived/synthetic/              재생성 가능한 합성 장면
   derived/detector/               class-agnostic detector train/validation COCO
   derived/yolo/                   검증된 detector COCO의 YOLO 파생 데이터
+  derived/classifier/             검증된 15/20-class classifier 파생 데이터
   collected/backgrounds/          합성 장면용 실제 빈 트레이 배경
   collected/scene_train/          추가 촬영한 실제 학습 장면
-src/bakery_scanner/               데이터 검증, split, 합성·detector 데이터와 CLI
+src/bakery_scanner/               데이터 검증, split, 합성·detector·classifier 데이터와 CLI
 configs/detector/                 재현 가능한 detector 학습 설정
 models/pretrained/                다운로드한 사전학습 모델 가중치
 runs/detector/                    로컬 checkpoint, 예측, metric과 환경 metadata
@@ -270,6 +271,55 @@ bakery-detector evaluate `
 ```
 
 두 subcommand 모두 `--json`을 지원합니다. 이 결과는 3장의 실제 validation 장면에 대한 최초 재현 가능한 train-side 기준선이며 test 성능이나 특정 POS 장치의 성능을 의미하지 않습니다. Test 평가는 기준 설정을 고정한 뒤 별도 단계에서만 수행합니다.
+
+## Classifier 학습 데이터 조립과 검증
+
+`bakery-classifier-data`는 레지스트리에 등록된 단일 객체 이미지와
+`datasets/base/val`의 정답 bbox crop을 모델 출력 인덱스별 파생 데이터로
+조립합니다. 원본 이미지, COCO JSON과 클래스 레지스트리는 수정하지 않으며
+출력은 `datasets/derived/classifier/<run-name>/`에만 저장합니다.
+
+Base run은 15개 출력 클래스를 사용하고 단일 객체 이미지는 train에만
+배치합니다. 실제 장면 crop은 동일 scene ID의 `e/m/h` 이미지가 나뉘지
+않도록 train과 validation으로 분할합니다.
+
+```powershell
+bakery-classifier-data generate `
+  --dataset-root datasets `
+  --run-name base_seed42 `
+  --phase base `
+  --seed 42 `
+  --validation-fraction 0.2
+
+bakery-classifier-data validate `
+  --dataset-root datasets `
+  --run-name base_seed42
+```
+
+Incremental run은 Base 데이터를 재사용하면서 20개 출력 클래스를 구성합니다.
+Incremental 클래스의 7장 중 seed로 결정된 1장은 임시 train-side validation,
+나머지 6장은 train에 배치합니다. 실제 Incremental 장면 validation이 수집되기
+전까지 이 결과는 단일 객체 도메인 검증으로 명시적으로 구분됩니다.
+기본 데이터 계약은 Base 클래스당 84장과 Incremental 클래스당 7장을
+요구하며, 개수가 달라지면 암묵적으로 비율을 바꾸지 않고 즉시 실패합니다.
+
+```powershell
+bakery-classifier-data generate `
+  --dataset-root datasets `
+  --run-name incremental_seed42 `
+  --phase incremental `
+  --seed 42 `
+  --validation-fraction 0.2
+
+bakery-classifier-data validate `
+  --dataset-root datasets `
+  --run-name incremental_seed42
+```
+
+두 subcommand 모두 `--json`을 지원합니다. Manifest는 source/output hash,
+COCO bbox, `category_id`와 `model_index`, split, validation 도메인과 클래스별
+표본 수를 기록합니다. Test 경로, 변조된 원본·crop, 누락·추가 파일과
+레지스트리 매핑 불일치는 경고가 아니라 오류입니다.
 
 ## 데이터 audit
 
