@@ -2,7 +2,7 @@
 
 고정 카메라로 촬영한 트레이 이미지에서 여러 빵의 위치와 종류를 식별하고, 신규 빵 클래스를 추가했을 때 기존 성능이 얼마나 유지되는지 검증하는 프로젝트입니다.
 
-현재 저장소에는 데이터셋 무결성 검사, COCO 검증, 학습 경로 안전장치, scene 단위 split, detector용 합성 장면 생성·replay 검증, YOLO 데이터 변환과 YOLO11n detector 학습·train-side 평가, Base 15-class와 Incremental 20-class classifier 학습 데이터 조립·검증, Base 및 Incremental ResNet18 classifier 학습·train-side 평가와 Base end-to-end 추론·평가가 구현되어 있습니다.
+현재 저장소에는 데이터셋 무결성 검사, COCO 검증, 학습 경로 안전장치, scene 단위 split, detector용 합성 장면 생성·replay 검증, YOLO 데이터 변환과 YOLO11n detector 학습·train-side 평가, Base 15-class와 Incremental 20-class classifier 학습 데이터 조립·검증, Base 및 Incremental ResNet18 classifier 학습·train-side 평가, Base end-to-end 추론·평가와 CPU-only 지연시간 benchmark가 구현되어 있습니다.
 
 ## 목표
 
@@ -115,6 +115,43 @@ Class-agnostic detector는 다음 데이터를 함께 사용합니다.
 
 CPU benchmark는 warm-up 이후 반복 실행하며 평균, P50과 P95를 기록합니다. Detector, crop·전처리, classifier batch, 후처리 및 전체 시간을 각각 측정합니다. 이 결과는 현재 PC에서 알고리즘을 상대 비교하기 위한 것이며 특정 POS 성능을 의미하지 않습니다.
 
+### CPU-only benchmark
+
+승인된 frozen YOLO11n detector와 Incremental 20-class ResNet18 classifier를
+train-side detector validation 장면에서 다음 명령으로 측정합니다.
+
+```powershell
+bakery-benchmark run --config configs/benchmark/incremental_resnet18_cpu.yaml
+```
+
+기본 설정은 전체 장면을 5회 warm-up한 뒤 30회 반복하며 PyTorch intra-op
+thread 4개, inter-op thread 1개를 사용합니다. Detector에는 운영 confidence를
+적용하고, 장면마다 유효한 모든 crop을 하나의 동적 classifier batch로 처리합니다.
+`runs/benchmark/incremental_resnet18_cpu/benchmark.json`은 5개 구간의 raw
+sample과 mean/P50/P95, 실제 batch 크기를 기록하며 `metadata.json`은 CPU 모델,
+thread 수, 입력 크기, dependency와 checkpoint·manifest hash를 기록합니다.
+
+이 명령은 detector를 `device="cpu"`로 호출하고 classifier 모델·tensor를 CPU에
+명시적으로 배치합니다. ONNX Runtime은 이 기준선에서 사용하지 않습니다. 향후
+ONNX backend를 추가할 경우 활성 provider가 오직 `CPUExecutionProvider`인지
+검증해야 합니다. Base/Incremental test는 읽지 않으며, 결과는 현재 개발 PC의
+측정치일 뿐 특정 POS 장치의 성능을 의미하지 않습니다.
+
+2026-07-20 실제 기준선은 Intel Core Ultra 9 285K, PyTorch 2.13.0,
+detector 입력 640, classifier 입력 224, scene당 batch 5 조건에서 측정했습니다.
+3개 train-side 장면을 30회 반복한 90개 표본의 결과입니다.
+
+| 구간 | Mean (ms) | P50 (ms) | P95 (ms) |
+|---|---:|---:|---:|
+| Detector | 97.700 | 97.762 | 101.671 |
+| Crop·전처리 | 110.866 | 110.611 | 113.145 |
+| Classifier batch | 31.964 | 33.488 | 37.109 |
+| 후처리 | 0.021 | 0.020 | 0.023 |
+| End-to-end | 240.567 | 241.043 | 248.645 |
+
+이 수치는 현재 개발 PC에서 한 초기 기준선이며 하드웨어가 다른 POS 장치의
+latency로 해석할 수 없습니다.
+
 ## 프로젝트 구조
 
 ```text
@@ -130,6 +167,7 @@ datasets/                         원본 및 프로젝트 데이터
   collected/scene_train/          추가 촬영한 실제 학습 장면
 src/bakery_scanner/               데이터 검증, split, 합성·detector·classifier 데이터와 CLI
 configs/detector/                 재현 가능한 detector 학습 설정
+configs/benchmark/                CPU-only benchmark 설정
 models/pretrained/                다운로드한 사전학습 모델 가중치
 runs/detector/                    로컬 checkpoint, 예측, metric과 환경 metadata
 tests/                            pytest 자동 테스트
