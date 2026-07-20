@@ -97,4 +97,4 @@
 - [x] Run `bakery-classifier train --config configs/classifier/resnet18_base.yaml`; expect a complete CUDA run.
 - [x] Run `bakery-classifier evaluate --config configs/classifier/resnet18_base.yaml --checkpoint runs/classifier/resnet18_base_seed42/checkpoints/best.pt`; expect validation-only metrics.
 - [x] Compare stored and reevaluated checkpoint hashes and metrics, run `python -m pytest -q`, `python -m compileall -q src tests`, and `git diff --check`.
-- [ ] Request independent review, fix all Critical/Important issues, commit with Korean imperative messages, push and create a Korean PR through the required workflow.
+- [x] Request independent review, fix all Critical/Important issues, commit with Korean imperative messages, push and create a Korean PR through the required workflow.
