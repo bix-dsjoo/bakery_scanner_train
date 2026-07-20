@@ -18,6 +18,9 @@ from bakery_scanner.final_evaluation import (
     FrozenRegistryConfig,
     FrozenTestSplitConfig,
     FinalInferenceBackend,
+    FinalInferenceResult,
+    FinalSplitInferenceResult,
+    FinalEvaluationPreflightReport,
     LoadedTestSplit,
     PreparedFinalEvaluation,
     _create_start_lock,
@@ -26,6 +29,7 @@ from bakery_scanner.final_evaluation import (
     _update_start_lock,
     load_final_evaluation_config,
     preflight_final_evaluation,
+    run_final_evaluation,
 )
 
 
@@ -315,11 +319,13 @@ def _manual_split(tmp_path: Path, name: str, model_index: int) -> LoadedTestSpli
     directory.mkdir()
     image_path = directory / f"{name}_scene_e_1.jpg"
     Image.new("RGB", (20, 20), (20, 30, 40)).save(image_path)
+    coco_path = directory / "instances_test.json"
+    coco_path.write_text("{}", encoding="utf-8")
     phase = "base" if name == "base" else "incremental"
     return LoadedTestSplit(
         name=name,
         phase=phase,
-        coco_path=directory / "instances_test.json",
+        coco_path=coco_path,
         images=(
             TestImageRecord(
                 image_id=image_path.name,
@@ -425,3 +431,152 @@ def test_final_inference_reuses_detector_and_batches_relevant_classifiers(
     assert len(incremental_model.calls) == 3
     assert set(loaded) == {"base.pt", "incremental.pt"}
     assert all(call["device"].type == "cuda" for call in loaded.values())
+
+
+def _perfect_backend_result(splits):
+    from bakery_scanner.classifier_evaluation import ClassifierPrediction
+    from bakery_scanner.detector_evaluation import Detection
+    from bakery_scanner.e2e_evaluation import EndToEndPrediction
+
+    results = {}
+    for split_name, split in splits.items():
+        relevant = ("base", "incremental") if split_name == "base" else ("incremental",)
+        detector_predictions = {}
+        classifier_predictions = {name: [] for name in relevant}
+        e2e_predictions = {name: {} for name in relevant}
+        batch_sizes = {
+            name: {"ground_truth": [], "detections": []} for name in relevant
+        }
+        for image in split.images:
+            detection_items = tuple(
+                Detection(obj.bbox_xyxy, 0.9, 0) for obj in image.objects
+            )
+            detector_predictions[image.image_id] = detection_items
+            for model_name in relevant:
+                model_predictions = []
+                for obj in image.objects:
+                    predicted = obj.model_index
+                    if split_name == "base" and model_name == "incremental":
+                        predicted = 14 if obj.model_index != 14 else 13
+                    classifier_predictions[model_name].append(
+                        ClassifierPrediction(
+                            obj.sample_id, obj.model_index, predicted, 0.8
+                        )
+                    )
+                    model_predictions.append(
+                        EndToEndPrediction(
+                            image.image_id,
+                            obj.bbox_xyxy,
+                            predicted,
+                            0.9,
+                            0.8,
+                            0.72,
+                        )
+                    )
+                e2e_predictions[model_name][image.image_id] = tuple(model_predictions)
+                batch_sizes[model_name]["ground_truth"].append(len(image.objects))
+                batch_sizes[model_name]["detections"].append(len(image.objects))
+        results[split_name] = FinalSplitInferenceResult(
+            detector_predictions,
+            {name: tuple(items) for name, items in classifier_predictions.items()},
+            e2e_predictions,
+            {
+                name: {kind: tuple(values) for kind, values in groups.items()}
+                for name, groups in batch_sizes.items()
+            },
+        )
+    return FinalInferenceResult(results)
+
+
+def test_run_final_evaluation_publishes_metrics_deltas_and_completes_lock(
+    tmp_path: Path, monkeypatch
+) -> None:
+    config_path = _write(tmp_path / "frozen.yaml", _payload())
+    config = load_final_evaluation_config(config_path)
+    prepared = _prepared(tmp_path)
+    for checkpoint in (
+        prepared.detector_checkpoint,
+        *prepared.classifier_checkpoints.values(),
+    ):
+        checkpoint.parent.mkdir(parents=True, exist_ok=True)
+        checkpoint.write_bytes(checkpoint.name.encode())
+    splits = {
+        "base": _manual_split(tmp_path, "base", 3),
+        "incremental": _manual_split(tmp_path, "incremental", 16),
+    }
+    monkeypatch.setattr(
+        "bakery_scanner.final_evaluation.preflight_final_evaluation",
+        lambda *_args, **_kwargs: FinalEvaluationPreflightReport(prepared),
+    )
+    monkeypatch.setattr(
+        "bakery_scanner.final_evaluation._load_test_split",
+        lambda _config, _prepared, name: splits[name],
+    )
+
+    class Backend:
+        def predict(self, **kwargs):
+            return _perfect_backend_result(kwargs["splits"])
+
+    report = run_final_evaluation(config, config_path, Backend())
+
+    assert set(path.name for path in report.output_dir.iterdir()) == {
+        "classifier_metrics.json",
+        "detector_metrics.json",
+        "e2e_metrics.json",
+        "frozen_config.yaml",
+        "metadata.json",
+        "predictions.json",
+        "report.md",
+        "summary.json",
+    }
+    classifier = json.loads(
+        (report.output_dir / "classifier_metrics.json").read_text(encoding="utf-8")
+    )
+    assert classifier["base_model_on_base_test"]["top1_accuracy"] == 1.0
+    assert classifier["incremental_model_on_base_test"]["top1_accuracy"] == 0.0
+    assert classifier["incremental_model_on_incremental_test"]["top1_accuracy"] == 1.0
+    summary = json.loads(report.summary_path.read_text(encoding="utf-8"))
+    assert summary["base_retention_delta"]["classifier_top1"] == -1.0
+    assert summary["base_retention_delta"]["e2e_map50"] == -1.0
+    assert summary["incremental_new_classes"]["classifier_top1"] == 1.0
+    lock = json.loads(prepared.lock_path.read_text(encoding="utf-8"))
+    assert lock["status"] == "completed"
+    metadata = json.loads(report.metadata_path.read_text(encoding="utf-8"))
+    assert metadata["selection"]["configuration_changed_after_test"] is False
+    assert all(
+        item["unchanged"] for item in metadata["checkpoints"].values()
+    )
+
+
+def test_run_final_evaluation_failure_cleans_staging_and_marks_lock(
+    tmp_path: Path, monkeypatch
+) -> None:
+    config_path = _write(tmp_path / "frozen.yaml", _payload())
+    config = load_final_evaluation_config(config_path)
+    prepared = _prepared(tmp_path)
+    for checkpoint in (
+        prepared.detector_checkpoint,
+        *prepared.classifier_checkpoints.values(),
+    ):
+        checkpoint.parent.mkdir(parents=True, exist_ok=True)
+        checkpoint.write_bytes(checkpoint.name.encode())
+    monkeypatch.setattr(
+        "bakery_scanner.final_evaluation.preflight_final_evaluation",
+        lambda *_args, **_kwargs: FinalEvaluationPreflightReport(prepared),
+    )
+    monkeypatch.setattr(
+        "bakery_scanner.final_evaluation._load_test_split",
+        lambda _config, _prepared, name: _manual_split(tmp_path, name, 3 if name == "base" else 16),
+    )
+
+    class Backend:
+        def predict(self, **_kwargs):
+            raise RuntimeError("synthetic inference failure")
+
+    with pytest.raises(RuntimeError, match="synthetic inference failure"):
+        run_final_evaluation(config, config_path, Backend())
+
+    assert not prepared.output_dir.exists()
+    assert not list(prepared.output_dir.parent.glob(".frozen_v1.tmp-*"))
+    lock = json.loads(prepared.lock_path.read_text(encoding="utf-8"))
+    assert lock["status"] == "failed"

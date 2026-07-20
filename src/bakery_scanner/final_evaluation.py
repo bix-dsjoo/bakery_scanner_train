@@ -5,6 +5,9 @@ import json
 import math
 import os
 import re
+import shutil
+import platform
+import sys
 import uuid
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -166,6 +169,22 @@ class FinalSplitInferenceResult:
 @dataclass(frozen=True, slots=True)
 class FinalInferenceResult:
     splits: Mapping[str, FinalSplitInferenceResult]
+
+
+@dataclass(frozen=True, slots=True)
+class FinalEvaluationReport:
+    output_dir: Path
+    summary_path: Path
+    metadata_path: Path
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "status": "completed",
+            "output_dir": str(self.output_dir),
+            "summary_path": str(self.summary_path),
+            "metadata_path": str(self.metadata_path),
+            "summary": _coco_payload(self.summary_path),
+        }
 
 
 def _object(value: object, expected: set[str], label: str) -> dict[str, Any]:
@@ -1107,3 +1126,423 @@ class FinalInferenceBackend:
                 },
             )
         return FinalInferenceResult(split_results)
+
+
+def _delta(new_value: Any, old_value: Any) -> float | None:
+    if new_value is None or old_value is None:
+        return None
+    return float(new_value) - float(old_value)
+
+
+def _environment_metadata() -> dict[str, Any]:
+    import importlib.metadata
+
+    dependencies = {}
+    for distribution in ("torch", "torchvision", "ultralytics", "Pillow", "PyYAML"):
+        try:
+            dependencies[distribution] = importlib.metadata.version(distribution)
+        except importlib.metadata.PackageNotFoundError:
+            dependencies[distribution] = "unavailable"
+    try:
+        import torch
+
+        gpu = torch.cuda.get_device_name(0) if torch.cuda.is_available() else None
+        cuda = torch.version.cuda
+    except (ImportError, RuntimeError):
+        gpu = None
+        cuda = None
+    return {
+        "python": platform.python_version(),
+        "platform": platform.platform(),
+        "executable": sys.executable,
+        "cpu": platform.processor() or platform.machine(),
+        "gpu": gpu,
+        "cuda": cuda,
+        "dependencies": dependencies,
+    }
+
+
+def _write_json(path: Path, payload: Mapping[str, Any]) -> None:
+    path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+
+def _evaluation_inputs(split: LoadedTestSplit):
+    from .detector_evaluation import EvaluationImage, EvaluationObject
+    from .e2e_evaluation import EndToEndImage, EndToEndTruth
+
+    detector_images = tuple(
+        EvaluationImage(
+            image.image_id,
+            image.difficulty,
+            tuple(
+                EvaluationObject(obj.bbox_xyxy, obj.category_id, obj.phase)
+                for obj in image.objects
+            ),
+        )
+        for image in split.images
+    )
+    e2e_images = tuple(
+        EndToEndImage(
+            image.image_id,
+            tuple(
+                EndToEndTruth(obj.bbox_xyxy, obj.model_index)
+                for obj in image.objects
+            ),
+        )
+        for image in split.images
+    )
+    return detector_images, e2e_images
+
+
+def _metrics(
+    config: FinalEvaluationConfig,
+    splits: Mapping[str, LoadedTestSplit],
+    result: FinalInferenceResult,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
+    from .classifier_evaluation import evaluate_classifier_predictions
+    from .detector_evaluation import (
+        EvaluationThresholds,
+        evaluate_detector_predictions,
+    )
+    from .e2e_evaluation import evaluate_end_to_end_predictions
+
+    if set(result.splits) != {"base", "incremental"}:
+        raise DataValidationError("final inference result splits are invalid")
+    thresholds = EvaluationThresholds(
+        config.detector.confidence_floor,
+        config.detector.operating_confidence,
+        config.detector.nms_iou,
+        config.detector.matching_iou,
+    )
+    detector_metrics = {}
+    classifier_metrics = {}
+    e2e_metrics = {}
+    for split_name in ("base", "incremental"):
+        detector_images, e2e_images = _evaluation_inputs(splits[split_name])
+        split_result = result.splits[split_name]
+        detector_metrics[f"{split_name}_test"] = evaluate_detector_predictions(
+            detector_images,
+            split_result.detector_predictions,
+            thresholds,
+        )
+        relevant = (
+            ("base", "incremental")
+            if split_name == "base"
+            else ("incremental",)
+        )
+        if set(split_result.classifier_predictions) != set(relevant) or set(
+            split_result.e2e_predictions
+        ) != set(relevant):
+            raise DataValidationError(
+                f"{split_name} final classifier variants are invalid"
+            )
+        for model_name in relevant:
+            key = f"{model_name}_model_on_{split_name}_test"
+            output_dimension = config.classifiers[model_name].output_dimension
+            classifier_metrics[key] = evaluate_classifier_predictions(
+                split_result.classifier_predictions[model_name],
+                output_dimension=output_dimension,
+            )
+            e2e_metrics[key] = evaluate_end_to_end_predictions(
+                e2e_images,
+                split_result.e2e_predictions[model_name],
+                output_dimension=output_dimension,
+                count_detector_confidence=config.detector.operating_confidence,
+            )
+    base_classifier = classifier_metrics["base_model_on_base_test"]
+    incremental_base_classifier = classifier_metrics[
+        "incremental_model_on_base_test"
+    ]
+    base_e2e = e2e_metrics["base_model_on_base_test"]
+    incremental_base_e2e = e2e_metrics["incremental_model_on_base_test"]
+    incremental_new_classifier = classifier_metrics[
+        "incremental_model_on_incremental_test"
+    ]
+    incremental_new_e2e = e2e_metrics["incremental_model_on_incremental_test"]
+    summary = {
+        "summary_version": 1,
+        "selection_status": config.selection_status,
+        "selection_basis": config.selection_basis,
+        "configuration_changed_after_test": False,
+        "base_retention_delta": {
+            "classifier_top1": _delta(
+                incremental_base_classifier["top1_accuracy"],
+                base_classifier["top1_accuracy"],
+            ),
+            "classifier_macro_f1": _delta(
+                incremental_base_classifier["macro_f1"],
+                base_classifier["macro_f1"],
+            ),
+            "e2e_map50": _delta(
+                incremental_base_e2e["map50"], base_e2e["map50"]
+            ),
+            "e2e_map50_95": _delta(
+                incremental_base_e2e["map50_95"], base_e2e["map50_95"]
+            ),
+            "e2e_supported_exact_count_accuracy": _delta(
+                incremental_base_e2e["supported_macro_exact_count_accuracy"],
+                base_e2e["supported_macro_exact_count_accuracy"],
+            ),
+        },
+        "incremental_new_classes": {
+            "classifier_top1": incremental_new_classifier["top1_accuracy"],
+            "classifier_macro_f1": incremental_new_classifier["macro_f1"],
+            "e2e_map50": incremental_new_e2e["map50"],
+            "e2e_map50_95": incremental_new_e2e["map50_95"],
+            "e2e_supported_exact_count_accuracy": incremental_new_e2e[
+                "supported_macro_exact_count_accuracy"
+            ],
+            "detector_recall": detector_metrics["incremental_test"]["global"][
+                "recall"
+            ],
+        },
+        "base_test": {
+            "base_classifier_top1": base_classifier["top1_accuracy"],
+            "incremental_classifier_top1": incremental_base_classifier[
+                "top1_accuracy"
+            ],
+            "base_e2e_map50": base_e2e["map50"],
+            "incremental_e2e_map50": incremental_base_e2e["map50"],
+            "detector_recall": detector_metrics["base_test"]["global"]["recall"],
+        },
+    }
+    return detector_metrics, classifier_metrics, e2e_metrics, summary
+
+
+def _prediction_payload(
+    splits: Mapping[str, LoadedTestSplit], result: FinalInferenceResult
+) -> dict[str, Any]:
+    payload = {"prediction_version": 1, "splits": {}}
+    for split_name in ("base", "incremental"):
+        split_result = result.splits[split_name]
+        payload["splits"][split_name] = {
+            "image_ids": [image.image_id for image in splits[split_name].images],
+            "detector": {
+                image_id: [
+                    {
+                        "bbox_xyxy": list(item.bbox_xyxy),
+                        "confidence": item.confidence,
+                        "class_index": item.class_index,
+                    }
+                    for item in items
+                ]
+                for image_id, items in split_result.detector_predictions.items()
+            },
+            "classifier": {
+                name: [item.to_dict() for item in items]
+                for name, items in split_result.classifier_predictions.items()
+            },
+            "end_to_end": {
+                name: {
+                    image_id: [item.to_dict() for item in items]
+                    for image_id, items in predictions.items()
+                }
+                for name, predictions in split_result.e2e_predictions.items()
+            },
+            "batch_sizes": {
+                name: {kind: list(values) for kind, values in groups.items()}
+                for name, groups in split_result.batch_sizes.items()
+            },
+        }
+    return payload
+
+
+def _report_markdown(summary: Mapping[str, Any]) -> str:
+    base = summary["base_test"]
+    delta = summary["base_retention_delta"]
+    new = summary["incremental_new_classes"]
+    return "\n".join(
+        (
+            "# Bakery Scanner 동결 최종 평가",
+            "",
+            "이 보고서는 test 접근 전에 동결된 설정을 one-shot으로 실행한 결과입니다.",
+            "test 결과를 확인한 뒤 모델, threshold, checkpoint 또는 코드를 변경하지 않았습니다.",
+            "",
+            "## Base test",
+            "",
+            f"- Detector Recall@0.5: {base['detector_recall']}",
+            f"- Base classifier Top-1: {base['base_classifier_top1']}",
+            f"- Incremental classifier Top-1: {base['incremental_classifier_top1']}",
+            f"- Base end-to-end mAP50: {base['base_e2e_map50']}",
+            f"- Incremental end-to-end mAP50: {base['incremental_e2e_map50']}",
+            "",
+            "## Base retention delta (Incremental - Base)",
+            "",
+            *(f"- {key}: {value}" for key, value in delta.items()),
+            "",
+            "## Incremental test 신규 5개 클래스",
+            "",
+            *(f"- {key}: {value}" for key, value in new.items()),
+            "",
+        )
+    )
+
+
+def _validate_completed_output(output_dir: Path) -> None:
+    expected = {
+        "classifier_metrics.json",
+        "detector_metrics.json",
+        "e2e_metrics.json",
+        "frozen_config.yaml",
+        "metadata.json",
+        "predictions.json",
+        "report.md",
+        "summary.json",
+    }
+    actual = {path.name for path in output_dir.iterdir()}
+    if actual != expected:
+        raise DataValidationError(
+            f"final evaluation files are invalid: expected={sorted(expected)}, actual={sorted(actual)}"
+        )
+    for filename in expected - {"frozen_config.yaml", "report.md"}:
+        _coco_payload(output_dir / filename)
+
+
+def _fail_active_lock(prepared: PreparedFinalEvaluation, error: Exception) -> None:
+    if not prepared.lock_path.is_file():
+        return
+    try:
+        payload = json.loads(prepared.lock_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return
+    if isinstance(payload, dict) and payload.get("status") == "started":
+        _update_start_lock(prepared, status="failed", error=str(error))
+
+
+def run_final_evaluation(
+    config: FinalEvaluationConfig,
+    config_path: str | Path,
+    backend: FinalInferenceBackend | None = None,
+) -> FinalEvaluationReport:
+    preflight = preflight_final_evaluation(config, config_path)
+    prepared = preflight.prepared
+    selected_backend = backend or FinalInferenceBackend()
+    checkpoint_paths = {
+        "detector": prepared.detector_checkpoint,
+        "base_classifier": prepared.classifier_checkpoints["base"],
+        "incremental_classifier": prepared.classifier_checkpoints["incremental"],
+    }
+    hashes_before = {name: _sha256(path) for name, path in checkpoint_paths.items()}
+    staging_dir = prepared.output_dir.parent / f".{prepared.output_dir.name}.tmp-{uuid.uuid4().hex}"
+    try:
+        splits = _load_locked_test_splits(
+            config, prepared, loader=_load_test_split
+        )
+        staging_dir.mkdir(parents=True)
+        result = selected_backend.predict(
+            splits=splits,
+            detector_checkpoint=prepared.detector_checkpoint,
+            classifier_checkpoints=prepared.classifier_checkpoints,
+            classifier_contexts=prepared.classifier_contexts,
+            config=config,
+        )
+        hashes_after = {name: _sha256(path) for name, path in checkpoint_paths.items()}
+        if hashes_after != hashes_before:
+            raise DataValidationError(
+                "one or more checkpoints changed during final evaluation"
+            )
+        detector_metrics, classifier_metrics, e2e_metrics, summary = _metrics(
+            config, splits, result
+        )
+        _write_json(staging_dir / "detector_metrics.json", detector_metrics)
+        _write_json(staging_dir / "classifier_metrics.json", classifier_metrics)
+        _write_json(staging_dir / "e2e_metrics.json", e2e_metrics)
+        _write_json(staging_dir / "summary.json", summary)
+        _write_json(staging_dir / "predictions.json", _prediction_payload(splits, result))
+        shutil.copy2(prepared.config_path, staging_dir / "frozen_config.yaml")
+        checkpoints = {
+            name: {
+                "path": str(path),
+                "sha256_before": hashes_before[name],
+                "sha256_after": hashes_after[name],
+                "unchanged": hashes_before[name] == hashes_after[name],
+            }
+            for name, path in checkpoint_paths.items()
+        }
+        _write_json(
+            staging_dir / "metadata.json",
+            {
+                "metadata_version": 1,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "evaluation_id": config.evaluation_id,
+                "selection": {
+                    "status": config.selection_status,
+                    "basis": config.selection_basis,
+                    "frozen_at_utc": config.frozen_at_utc,
+                    "configuration_changed_after_test": False,
+                },
+                "configuration": {
+                    "path": str(prepared.config_path),
+                    "sha256": prepared.config_sha256,
+                },
+                "test_splits": {
+                    name: {
+                        "phase": split.phase,
+                        "coco_path": str(split.coco_path),
+                        "coco_sha256": _sha256(split.coco_path),
+                        "image_count": len(split.images),
+                        "annotation_count": sum(
+                            len(image.objects) for image in split.images
+                        ),
+                    }
+                    for name, split in splits.items()
+                },
+                "thresholds": {
+                    "confidence_floor": config.detector.confidence_floor,
+                    "operating_confidence": config.detector.operating_confidence,
+                    "nms_iou": config.detector.nms_iou,
+                    "matching_iou": config.detector.matching_iou,
+                    "e2e_iou_thresholds": [
+                        round(0.5 + 0.05 * index, 2) for index in range(10)
+                    ],
+                },
+                "inference": {
+                    "device": config.inference.device,
+                    "detector_image_size": config.detector.image_size,
+                    "classifier_image_sizes": {
+                        name: item.image_size
+                        for name, item in config.classifiers.items()
+                    },
+                    "classifier_batch_strategy": config.inference.classifier_batch_strategy,
+                    "combined_score": config.inference.combined_score,
+                    "batch_sizes": {
+                        split_name: {
+                            model_name: {
+                                kind: list(values)
+                                for kind, values in groups.items()
+                            }
+                            for model_name, groups in split_result.batch_sizes.items()
+                        }
+                        for split_name, split_result in result.splits.items()
+                    },
+                },
+                "checkpoints": checkpoints,
+                "provenance": dict(prepared.provenance),
+                "metric_versions": {
+                    "detector": 1,
+                    "classifier": 1,
+                    "end_to_end": 1,
+                    "summary": 1,
+                },
+                "environment": _environment_metadata(),
+            },
+        )
+        (staging_dir / "report.md").write_text(
+            _report_markdown(summary), encoding="utf-8"
+        )
+        _validate_completed_output(staging_dir)
+        staging_dir.rename(prepared.output_dir)
+        _update_start_lock(prepared, status="completed")
+        return FinalEvaluationReport(
+            prepared.output_dir,
+            prepared.output_dir / "summary.json",
+            prepared.output_dir / "metadata.json",
+        )
+    except Exception as exc:
+        if staging_dir.exists():
+            shutil.rmtree(staging_dir, ignore_errors=True)
+        _fail_active_lock(prepared, exc)
+        raise

@@ -29,16 +29,16 @@ merged `main` and publish a documentation-only result report.
 - Create: `src/bakery_scanner/final_evaluation.py`
 - Create: `tests/test_final_evaluation.py`
 
-- [ ] Write failing tests for exact nested schema, freeze declarations, valid
+- [x] Write failing tests for exact nested schema, freeze declarations, valid
   phases/output dimensions, numeric thresholds, SHA-256 values, and run names.
-- [ ] Implement immutable config dataclasses and strict YAML loading.
-- [ ] Write a sentinel test whose test paths raise on any filesystem access;
+- [x] Implement immutable config dataclasses and strict YAML loading.
+- [x] Write a sentinel test whose test paths raise on any filesystem access;
   prove `preflight_final_evaluation()` never touches them.
-- [ ] Implement preflight hash/provenance/context/CUDA/output validation using
+- [x] Implement preflight hash/provenance/context/CUDA/output validation using
   only non-test paths.
-- [ ] Test config/checkpoint/metadata/context drift and existing lock/output
+- [x] Test config/checkpoint/metadata/context drift and existing lock/output
   failures.
-- [ ] Commit: `feat(eval): 최종 평가 사전 검증을 추가한다`.
+- [x] Commit: `feat(eval): 최종 평가 사전 검증을 추가한다`.
 
 ## Task 2: Test COCO loading and one-shot lock
 
@@ -47,16 +47,16 @@ merged `main` and publish a documentation-only result report.
 - Modify: `src/bakery_scanner/final_evaluation.py`
 - Modify: `tests/test_final_evaluation.py`
 
-- [ ] Build synthetic Base/Incremental COCO fixtures outside real datasets.
-- [ ] Write failing tests for COCO validation, registry category-to-model-index
+- [x] Build synthetic Base/Incremental COCO fixtures outside real datasets.
+- [x] Write failing tests for COCO validation, registry category-to-model-index
   conversion, difficulty parsing, detector/end-to-end truth, and GT crop order.
-- [ ] Implement post-lock test loading through `validate_coco()` plus strict
+- [x] Implement post-lock test loading through `validate_coco()` plus strict
   payload conversion.
-- [ ] Write failing tests proving the lock is created before the first test
+- [x] Write failing tests proving the lock is created before the first test
   read, persists on success/failure, refuses a second run, and records config
   hash/status/timestamps.
-- [ ] Implement atomic lock create/update and staging cleanup.
-- [ ] Commit: `feat(eval): one-shot test 입력 경계를 구현한다`.
+- [x] Implement atomic lock create/update and staging cleanup.
+- [x] Commit: `feat(eval): one-shot test 입력 경계를 구현한다`.
 
 ## Task 3: Frozen GPU inference backend
 
@@ -65,16 +65,16 @@ merged `main` and publish a documentation-only result report.
 - Modify: `src/bakery_scanner/final_evaluation.py`
 - Modify: `tests/test_final_evaluation.py`
 
-- [ ] Write failing adapter tests using fake detector/classifiers for detector
+- [x] Write failing adapter tests using fake detector/classifiers for detector
   floor/NMS/device arguments, detector reuse, GT crops, one scene batch, empty
   detections, and Base classifier exclusion from Incremental test.
-- [ ] Implement strict model loading on CUDA device 0 and per-split detector
+- [x] Implement strict model loading on CUDA device 0 and per-split detector
   inference reuse.
-- [ ] Implement GT-crop classifier predictions and end-to-end classifications
+- [x] Implement GT-crop classifier predictions and end-to-end classifications
   for the three frozen combinations.
-- [ ] Verify all emitted model indices, confidences, image/sample IDs, bbox
+- [x] Verify all emitted model indices, confidences, image/sample IDs, bbox
   bounds, and batch sizes.
-- [ ] Commit: `feat(eval): 동결 모델의 최종 추론을 구현한다`.
+- [x] Commit: `feat(eval): 동결 모델의 최종 추론을 구현한다`.
 
 ## Task 4: Metrics, deltas, raw artifacts, and CLI
 
@@ -87,18 +87,18 @@ merged `main` and publish a documentation-only result report.
 - Modify: `tests/test_final_evaluation.py`
 - Modify: `README.md`
 
-- [ ] Write failing orchestration tests for both detector reports, all three
+- [x] Write failing orchestration tests for both detector reports, all three
   classifier reports, all three end-to-end reports, Base-retention deltas, and
   new-five separation.
-- [ ] Implement required metrics by reusing validated detector, classifier, and
+- [x] Implement required metrics by reusing validated detector, classifier, and
   end-to-end evaluation functions.
-- [ ] Publish frozen config, metadata, raw predictions, metric files, summary,
+- [x] Publish frozen config, metadata, raw predictions, metric files, summary,
   and Korean report atomically; verify exact completed file set.
-- [ ] Add `bakery-final-eval preflight/run --config ...` CLI tests and entry
+- [x] Add `bakery-final-eval preflight/run --config ...` CLI tests and entry
   point. Print an explicit irreversible one-shot warning for `run`.
-- [ ] Document only the implemented preflight/run commands and the two-PR
+- [x] Document only the implemented preflight/run commands and the two-PR
   freeze workflow; do not include test results yet.
-- [ ] Run full tests, compileall, diff-check, and verify no process accessed the
+- [x] Run full tests, compileall, diff-check, and verify no process accessed the
   real test paths.
 - [ ] Commit, push, open a Korean Ready evaluator PR, obtain independent review,
   repeat review after diff changes, and use a separate merge agent.
