@@ -865,10 +865,11 @@ def build_classifier_dataset(
     root = config.dataset_root.resolve(strict=False)
     output = _run_dir(root, config.run_name)
     registry_path = root / "class_registry.json"
+    scene_coco = root / "base" / "val" / "instances_val.json"
+    assert_training_paths_safe([registry_path, scene_coco], root)
     registry = load_class_registry(registry_path)
     directory_counts = validate_class_directories(root, registry)
     _validate_class_image_counts(directory_counts, registry, config)
-    scene_coco = root / "base" / "val" / "instances_val.json"
     included_phases = {"base"} if config.phase == "base" else {"base", "incremental"}
     class_records = [record for record in registry.classes if record.phase in included_phases]
     source_paths = [scene_coco, registry_path]

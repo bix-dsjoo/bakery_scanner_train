@@ -258,6 +258,37 @@ def test_build_rejects_scene_link_to_test_before_opening_it(
     assert not (dataset_root / "derived" / "classifier" / "unsafe-scene").exists()
 
 
+def test_build_rejects_coco_link_to_test_before_reading_it(
+    dataset_factory,
+    monkeypatch,
+) -> None:
+    dataset_root = dataset_factory()
+    coco_path = dataset_root / "base" / "val" / "instances_val.json"
+    test_coco = dataset_root / "base" / "test" / "instances_test.json"
+    original_read_text = Path.read_text
+    original_resolve = Path.resolve
+    coco_absolute = coco_path.absolute()
+    test_resolved = original_resolve(test_coco)
+
+    def resolve_coco_link(path, *args, **kwargs):
+        if path.absolute() == coco_absolute:
+            return test_resolved
+        return original_resolve(path, *args, **kwargs)
+
+    def reject_test_coco_read(path, *args, **kwargs):
+        if path.absolute() == coco_absolute:
+            raise AssertionError("test COCO was read before path safety validation")
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", resolve_coco_link)
+    monkeypatch.setattr(Path, "read_text", reject_test_coco_read)
+    with pytest.raises(DataValidationError, match="evaluation-only"):
+        build_classifier_dataset(
+            _config(dataset_root, "unsafe-coco", "base")
+        )
+    assert not (dataset_root / "derived" / "classifier" / "unsafe-coco").exists()
+
+
 def test_validation_hashes_scene_without_annotations(dataset_factory) -> None:
     dataset_root = dataset_factory()
     coco_path = dataset_root / "base" / "val" / "instances_val.json"
