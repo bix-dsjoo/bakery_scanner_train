@@ -2,7 +2,7 @@
 
 고정 카메라로 촬영한 트레이 이미지에서 여러 빵의 위치와 종류를 식별하고, 신규 빵 클래스를 추가했을 때 기존 성능이 얼마나 유지되는지 검증하는 프로젝트입니다.
 
-현재 저장소에는 데이터셋 무결성 검사, COCO 검증, 학습 경로 안전장치, scene 단위 split, detector용 합성 장면 생성·replay 검증, YOLO 데이터 변환과 YOLO11n detector 학습·train-side 평가, Base 15-class와 Incremental 20-class classifier 학습 데이터 조립·검증, Base 및 Incremental ResNet18 classifier 학습·train-side 평가, Base end-to-end 추론·평가와 CPU-only 지연시간 benchmark가 구현되어 있습니다.
+현재 저장소에는 데이터셋 무결성 검사, COCO 검증, 학습 경로 안전장치, scene 단위 split, detector용 합성 장면 생성·replay 검증, YOLO 데이터 변환과 YOLO11n detector 학습·train-side 평가, Base 15-class와 Incremental 20-class classifier 학습 데이터 조립·검증, Base 및 Incremental ResNet18 classifier 학습·train-side 평가, end-to-end 추론·평가, CPU-only 지연시간 benchmark와 동결 one-shot 최종 평가가 구현되어 있습니다.
 
 ## 목표
 
@@ -173,8 +173,25 @@ bakery-final-eval run --config configs/final_evaluation/frozen_v1.yaml
 `runs/final_evaluation/.frozen_v1.started.json` lock을 생성합니다. 성공하거나
 실패해도 lock을 삭제하지 않으며 같은 평가를 다시 실행하지 않습니다. 결과를 본
 뒤에는 코드, 모델, checkpoint, threshold와 frozen config를 변경하지 않고 결과
-문서만 별도 PR로 반영합니다. 실제 test 수치는 one-shot 실행 전에는 문서에
-기록하지 않습니다.
+문서만 별도 PR로 반영합니다.
+
+2026-07-20 one-shot 실행은 merge commit `2a453fb`의 동결 evaluator와 config
+SHA-256 `ae3c72c448dc081e80e5ab1ef649b040eb82ac896275c2e655ba0db5f634b236`를
+사용해 한 번만 완료했습니다. 핵심 결과는 다음과 같습니다.
+
+| 평가 | Detector AP50 / Recall | GT-crop Top-1 / Macro F1 | E2E mAP50 / mAP50:95 | 지원 클래스 Macro 수량 정확도 |
+|---|---:|---:|---:|---:|
+| Base model · Base test | 1.0000 / 1.0000 | 0.7556 / 0.7219 | 0.7254 / 0.6670 | 0.8254 |
+| Incremental model · Base test | 1.0000 / 1.0000 | 0.7333 / 0.7389 | 0.7858 / 0.6881 | 0.8254 |
+| Incremental model · Incremental test | 0.4989 / 1.0000 | 0.1000 / 0.1333 | 0.1061 / 0.0929 | 0.5333 |
+
+Incremental 모델의 Base test Top-1 변화는 `-0.0222`, E2E mAP50 변화는
+`+0.0603`입니다. 신규 5개 클래스 성능은 낮아 현재 checkpoint를 배포 준비
+모델로 간주하지 않습니다. Test 결과를 근거로 현재 모델이나 설정을 다시 선택하지
+않으며, 다음 실험은 추가 train-side 데이터와 validation만으로 설계해야 합니다.
+전체 지표, 클래스별 결과, 실행 환경, hash와 한계는
+[`docs/reports/2026-07-20-final-evaluation.md`](docs/reports/2026-07-20-final-evaluation.md)에
+기록합니다.
 
 ## 프로젝트 구조
 
