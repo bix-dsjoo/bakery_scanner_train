@@ -1,0 +1,47 @@
+freeze_version: 1
+evaluation_id: bakery_scanner_frozen_v1
+frozen_at_utc: "2026-07-20T10:38:51.0762316Z"
+selection_status: frozen_before_test_access
+selection_basis: train_side_validation_only
+dataset_root: datasets
+registry:
+  path: datasets/class_registry.json
+  sha256: 9bf47dbfcb29d45401878544cd919418cd172782dafe93699cf0a5dab352841d
+test_splits:
+  base:
+    coco_path: datasets/base/test/instances_test.json
+    expected_phase: base
+  incremental:
+    coco_path: datasets/incremental/test/instances_test.json
+    expected_phase: incremental
+detector:
+  config_path: configs/detector/yolo11n_base.yaml
+  config_sha256: 2cce31c4d648fc52e4f349fa546181913a7b25e77b5e9dda0ded2cb2fc7dbbda
+  checkpoint: runs/detector/yolo11n_base_seed42/checkpoints/best.pt
+  checkpoint_sha256: ca109b8a3cebb92c31a11d0b82dd532e9943e59a0e009095bfaada106c0e151b
+  image_size: 640
+  confidence_floor: 0.001
+  operating_confidence: 0.25
+  nms_iou: 0.7
+  matching_iou: 0.5
+classifiers:
+  base:
+    config_path: configs/classifier/resnet18_base.yaml
+    config_sha256: 69c8192966eea0f535aab375383c3443bf51f10f5fed5fe1d57d0a7232310227
+    checkpoint: runs/classifier/resnet18_base_seed42/checkpoints/best.pt
+    checkpoint_sha256: 934b7fb31aebb70099ec149fd6e6d7e1c5a762e48e96e3c225bf718fc7f55763
+    output_dimension: 15
+    image_size: 224
+  incremental:
+    config_path: configs/classifier/resnet18_incremental.yaml
+    config_sha256: 54dacde0abfe5700b96249eacf2002923735b3d48bf319fc76c8c841cc41688d
+    checkpoint: runs/classifier/resnet18_incremental_seed42/checkpoints/best.pt
+    checkpoint_sha256: b9384bbf6fd3d2725d2c8534e751e235d6a9fcd716fad8057f0a8521d29e7d8b
+    output_dimension: 20
+    image_size: 224
+inference:
+  device: "0"
+  classifier_batch_strategy: one_batch_per_scene
+  combined_score: detector_confidence_times_classifier_confidence
+output_root: runs/final_evaluation
+run_name: frozen_v1

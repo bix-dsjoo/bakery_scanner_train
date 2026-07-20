@@ -152,6 +152,30 @@ detector 입력 640, classifier 입력 224, scene당 batch 5 조건에서 측정
 이 수치는 현재 개발 PC에서 한 초기 기준선이며 하드웨어가 다른 POS 장치의
 latency로 해석할 수 없습니다.
 
+### 동결 최종 평가
+
+최종 test 평가는 [`configs/final_evaluation/frozen_v1.yaml`](configs/final_evaluation/frozen_v1.yaml)에
+기록된 checkpoint·config·registry hash와 detector threshold를 사용합니다. 먼저
+test를 읽지 않는 preflight를 실행합니다.
+
+```powershell
+bakery-final-eval preflight --config configs/final_evaluation/frozen_v1.yaml
+```
+
+Evaluator와 frozen config가 독립 리뷰 후 `main`에 병합된 뒤에만 다음 one-shot
+명령을 실행합니다.
+
+```powershell
+bakery-final-eval run --config configs/final_evaluation/frozen_v1.yaml
+```
+
+`run`은 실제 test COCO를 열기 전에
+`runs/final_evaluation/.frozen_v1.started.json` lock을 생성합니다. 성공하거나
+실패해도 lock을 삭제하지 않으며 같은 평가를 다시 실행하지 않습니다. 결과를 본
+뒤에는 코드, 모델, checkpoint, threshold와 frozen config를 변경하지 않고 결과
+문서만 별도 PR로 반영합니다. 실제 test 수치는 one-shot 실행 전에는 문서에
+기록하지 않습니다.
+
 ## 프로젝트 구조
 
 ```text
@@ -168,6 +192,7 @@ datasets/                         원본 및 프로젝트 데이터
 src/bakery_scanner/               데이터 검증, split, 합성·detector·classifier 데이터와 CLI
 configs/detector/                 재현 가능한 detector 학습 설정
 configs/benchmark/                CPU-only benchmark 설정
+configs/final_evaluation/         test 접근 전에 동결한 최종 평가 설정
 models/pretrained/                다운로드한 사전학습 모델 가중치
 runs/detector/                    로컬 checkpoint, 예측, metric과 환경 metadata
 tests/                            pytest 자동 테스트
