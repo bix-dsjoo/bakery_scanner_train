@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 import os
 import re
+import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path, PurePath
 from typing import Any
 
@@ -123,6 +125,34 @@ class FinalEvaluationPreflightReport:
             "lock_path": str(self.prepared.lock_path),
             "test_data_accessed": False,
         }
+
+
+@dataclass(frozen=True, slots=True)
+class TestObjectRecord:
+    sample_id: str
+    annotation_id: int
+    bbox_xyxy: tuple[float, float, float, float]
+    category_id: int
+    model_index: int
+    phase: str
+
+
+@dataclass(frozen=True, slots=True)
+class TestImageRecord:
+    image_id: str
+    image_path: Path
+    width: int
+    height: int
+    difficulty: str | None
+    objects: tuple[TestObjectRecord, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class LoadedTestSplit:
+    name: str
+    phase: str
+    coco_path: Path
+    images: tuple[TestImageRecord, ...]
 
 
 def _object(value: object, expected: set[str], label: str) -> dict[str, Any]:
@@ -594,3 +624,179 @@ def preflight_final_evaluation(
         cuda_available or _cuda_available,
     )
     return FinalEvaluationPreflightReport(prepared)
+
+
+def _configured_dataset_path(value: str, dataset_root: Path) -> Path:
+    candidate = Path(value)
+    if candidate.is_absolute():
+        return candidate.resolve(strict=False)
+    if candidate.parts and candidate.parts[0].casefold() == dataset_root.name.casefold():
+        return (dataset_root.parent / candidate).resolve(strict=False)
+    return (dataset_root / candidate).resolve(strict=False)
+
+
+def _coco_payload(path: Path) -> dict[str, Any]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise DataValidationError(f"cannot load final test COCO {path}: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise DataValidationError("final test COCO must be a JSON object")
+    return payload
+
+
+def _load_test_split(
+    config: FinalEvaluationConfig,
+    prepared: PreparedFinalEvaluation,
+    name: str,
+) -> LoadedTestSplit:
+    from .coco import validate_coco
+    from .detector_training import _difficulty
+    from .registry import load_class_registry
+
+    if name not in {"base", "incremental"}:
+        raise DataValidationError(f"unknown final test split: {name}")
+    selected = config.test_splits[name]
+    coco_path = _configured_dataset_path(selected.coco_path, prepared.dataset_root)
+    registry = load_class_registry(prepared.registry_path)
+    validate_coco(coco_path, registry, selected.expected_phase)
+    payload = _coco_payload(coco_path)
+    raw_images = payload.get("images")
+    raw_annotations = payload.get("annotations")
+    if not isinstance(raw_images, list) or not isinstance(raw_annotations, list):
+        raise DataValidationError("final test COCO images/annotations must be lists")
+    annotations_by_image: dict[int, list[dict[str, Any]]] = {}
+    for annotation in raw_annotations:
+        if not isinstance(annotation, dict):
+            raise DataValidationError("final test annotation must be an object")
+        image_id = annotation["image_id"]
+        annotations_by_image.setdefault(image_id, []).append(annotation)
+    images = []
+    for raw_image in raw_images:
+        if not isinstance(raw_image, dict):
+            raise DataValidationError("final test image must be an object")
+        coco_image_id = raw_image["id"]
+        file_name = raw_image["file_name"]
+        image_path = (coco_path.parent / file_name).resolve(strict=False)
+        objects = []
+        for annotation in sorted(
+            annotations_by_image.get(coco_image_id, []), key=lambda item: item["id"]
+        ):
+            record = registry.by_category_id.get(annotation["category_id"])
+            if record is None or record.phase != selected.expected_phase:
+                raise DataValidationError(
+                    "final test annotation category does not match frozen phase"
+                )
+            x, y, width, height = (float(value) for value in annotation["bbox"])
+            objects.append(
+                TestObjectRecord(
+                    sample_id=f"{name}:{file_name}:annotation-{annotation['id']}",
+                    annotation_id=int(annotation["id"]),
+                    bbox_xyxy=(x, y, x + width, y + height),
+                    category_id=record.category_id,
+                    model_index=record.model_index,
+                    phase=record.phase,
+                )
+            )
+        images.append(
+            TestImageRecord(
+                image_id=str(file_name),
+                image_path=image_path,
+                width=int(raw_image["width"]),
+                height=int(raw_image["height"]),
+                difficulty=_difficulty(str(file_name)),
+                objects=tuple(objects),
+            )
+        )
+    if not images:
+        raise DataValidationError(f"{name} final test must contain images")
+    return LoadedTestSplit(name, selected.expected_phase, coco_path, tuple(images))
+
+
+def _lock_payload(
+    config: FinalEvaluationConfig,
+    prepared: PreparedFinalEvaluation,
+) -> dict[str, Any]:
+    return {
+        "lock_version": 1,
+        "evaluation_id": config.evaluation_id,
+        "run_name": config.run_name,
+        "config_path": str(prepared.config_path),
+        "config_sha256": prepared.config_sha256,
+        "status": "started",
+        "test_access_started_at": datetime.now(timezone.utc).isoformat(),
+        "test_splits": {
+            name: {
+                "coco_path": selected.coco_path,
+                "expected_phase": selected.expected_phase,
+            }
+            for name, selected in config.test_splits.items()
+        },
+    }
+
+
+def _create_start_lock(
+    config: FinalEvaluationConfig, prepared: PreparedFinalEvaluation
+) -> None:
+    prepared.lock_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps(
+        _lock_payload(config, prepared), ensure_ascii=False, indent=2, sort_keys=True
+    ) + "\n"
+    try:
+        descriptor = os.open(
+            prepared.lock_path,
+            os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+        )
+    except FileExistsError as exc:
+        raise DataValidationError(
+            f"final evaluation one-shot lock already exists: {prepared.lock_path}"
+        ) from exc
+    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        handle.write(payload)
+
+
+def _update_start_lock(
+    prepared: PreparedFinalEvaluation,
+    *,
+    status: str,
+    error: str | None = None,
+) -> None:
+    if status not in {"completed", "failed"}:
+        raise DataValidationError("final evaluation lock status is invalid")
+    try:
+        payload = json.loads(prepared.lock_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise DataValidationError("cannot update final evaluation one-shot lock") from exc
+    if not isinstance(payload, dict) or payload.get("status") != "started":
+        raise DataValidationError("final evaluation one-shot lock is not active")
+    payload["status"] = status
+    payload["finished_at"] = datetime.now(timezone.utc).isoformat()
+    if error is not None:
+        payload["error"] = error
+    temporary = prepared.lock_path.with_name(
+        f".{prepared.lock_path.name}.tmp-{uuid.uuid4().hex}"
+    )
+    temporary.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    temporary.replace(prepared.lock_path)
+
+
+def _load_locked_test_splits(
+    config: FinalEvaluationConfig,
+    prepared: PreparedFinalEvaluation,
+    *,
+    loader: Callable[
+        [FinalEvaluationConfig, PreparedFinalEvaluation, str], Any
+    ] = _load_test_split,
+) -> dict[str, Any]:
+    _create_start_lock(config, prepared)
+    try:
+        return {
+            name: loader(config, prepared, name)
+            for name in ("base", "incremental")
+        }
+    except Exception as exc:
+        _update_start_lock(prepared, status="failed", error=str(exc))
+        raise

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import replace
 from pathlib import Path
 
@@ -15,7 +16,12 @@ from bakery_scanner.final_evaluation import (
     FrozenInferenceConfig,
     FrozenRegistryConfig,
     FrozenTestSplitConfig,
+    LoadedTestSplit,
     PreparedFinalEvaluation,
+    _create_start_lock,
+    _load_locked_test_splits,
+    _load_test_split,
+    _update_start_lock,
     load_final_evaluation_config,
     preflight_final_evaluation,
 )
@@ -177,3 +183,96 @@ def test_preflight_does_not_access_test_paths(tmp_path: Path, monkeypatch) -> No
     assert report.prepared == prepared
     assert report.status == "ready"
     assert accessed == []
+
+
+def _synthetic_config(tmp_path: Path, dataset_root: Path) -> FinalEvaluationConfig:
+    config = load_final_evaluation_config(_write(tmp_path / "frozen.yaml", _payload()))
+    return replace(
+        config,
+        dataset_root=str(dataset_root),
+        registry=replace(
+            config.registry, path=str(dataset_root / "class_registry.json")
+        ),
+        test_splits={
+            "base": FrozenTestSplitConfig(
+                str(dataset_root / "base" / "test" / "instances_test.json"), "base"
+            ),
+            "incremental": FrozenTestSplitConfig(
+                str(
+                    dataset_root
+                    / "incremental"
+                    / "test"
+                    / "instances_test.json"
+                ),
+                "incremental",
+            ),
+        },
+    )
+
+
+def test_load_test_split_maps_coco_categories_to_model_indices(
+    tmp_path: Path, dataset_factory
+) -> None:
+    dataset_root = dataset_factory()
+    config = _synthetic_config(tmp_path, dataset_root)
+    prepared = replace(
+        _prepared(tmp_path),
+        dataset_root=dataset_root,
+        registry_path=dataset_root / "class_registry.json",
+    )
+
+    base = _load_test_split(config, prepared, "base")
+    incremental = _load_test_split(config, prepared, "incremental")
+
+    assert isinstance(base, LoadedTestSplit)
+    assert base.phase == "base"
+    assert [image.difficulty for image in base.images] == ["easy", "medium", "hard"]
+    assert all(obj.model_index < 15 for image in base.images for obj in image.objects)
+    assert all(obj.phase == "base" for image in base.images for obj in image.objects)
+    assert all(image.image_path.is_file() for image in base.images)
+    assert all(
+        obj.model_index >= 15
+        for image in incremental.images
+        for obj in image.objects
+    )
+    assert len({obj.sample_id for image in base.images for obj in image.objects}) == 3
+
+
+def test_one_shot_lock_precedes_test_load_and_refuses_second_start(
+    tmp_path: Path
+) -> None:
+    config = load_final_evaluation_config(_write(tmp_path / "frozen.yaml", _payload()))
+    prepared = _prepared(tmp_path)
+    observed = []
+
+    def loader(_config, selected, name):
+        payload = json.loads(selected.lock_path.read_text(encoding="utf-8"))
+        observed.append((name, payload["status"]))
+        return name
+
+    splits = _load_locked_test_splits(config, prepared, loader=loader)
+
+    assert splits == {"base": "base", "incremental": "incremental"}
+    assert observed == [("base", "started"), ("incremental", "started")]
+    with pytest.raises(DataValidationError, match="one-shot lock"):
+        _create_start_lock(config, prepared)
+    _update_start_lock(prepared, status="completed")
+    payload = json.loads(prepared.lock_path.read_text(encoding="utf-8"))
+    assert payload["status"] == "completed"
+    assert payload["config_sha256"] == prepared.config_sha256
+
+
+def test_one_shot_lock_persists_as_failed_when_test_load_fails(tmp_path: Path) -> None:
+    config = load_final_evaluation_config(_write(tmp_path / "frozen.yaml", _payload()))
+    prepared = _prepared(tmp_path)
+
+    def fail(_config, selected, _name):
+        assert selected.lock_path.is_file()
+        raise DataValidationError("synthetic COCO failure")
+
+    with pytest.raises(DataValidationError, match="synthetic COCO failure"):
+        _load_locked_test_splits(config, prepared, loader=fail)
+
+    payload = json.loads(prepared.lock_path.read_text(encoding="utf-8"))
+    assert payload["status"] == "failed"
+    assert "synthetic COCO failure" in payload["error"]
