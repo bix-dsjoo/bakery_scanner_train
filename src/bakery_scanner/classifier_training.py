@@ -633,6 +633,9 @@ def train_classifier(
     )
     if not train_samples or not validation_samples:
         raise DataValidationError("classifier train and validation splits must be non-empty")
+    class_counts, class_weights = _balanced_class_statistics(
+        train_samples, dataset_report.output_dimension
+    )
 
     output_dir = output_root / config.run_name
     if output_dir.exists():
@@ -641,7 +644,11 @@ def train_classifier(
     staging_dir = output_root / f".{config.run_name}.tmp-{uuid.uuid4().hex}"
     staging_dir.mkdir()
     try:
-        arguments = _backend_arguments(config)
+        arguments = {
+            **_backend_arguments(config),
+            "class_counts": class_counts,
+            "class_weights": class_weights,
+        }
         backend_result = selected_backend.train(
             pretrained_model=pretrained_model,
             train_samples=train_samples,
@@ -725,6 +732,13 @@ def train_classifier(
                         "best_epoch": backend_result.best_epoch,
                         "epochs_completed": backend_result.epochs_completed,
                         "selection_metric": "validation_loss",
+                    },
+                    "class_balance": {
+                        "formula": (
+                            "train_samples / (output_dimension * class_count)"
+                        ),
+                        "class_counts": list(class_counts),
+                        "class_weights": list(class_weights),
                     },
                     "environment": _environment_metadata(),
                     "determinism": {
@@ -862,6 +876,124 @@ def _build_resnet18(pretrained_model: Path, output_dimension: int):
         ) from exc
     model.fc = nn.Linear(model.fc.in_features, output_dimension)
     return model
+
+
+def _build_incremental_resnet18(
+    base_checkpoint: Path,
+    *,
+    output_dimension: int,
+    checkpoint_context: Mapping[str, Any],
+    image_size: int,
+):
+    import torch
+    from torch import nn
+    from torchvision.models import resnet18
+
+    if output_dimension != 20:
+        raise DataValidationError("Incremental classifier requires 20 outputs")
+    try:
+        payload = torch.load(base_checkpoint, map_location="cpu", weights_only=True)
+    except (
+        OSError,
+        RuntimeError,
+        TypeError,
+        ValueError,
+        EOFError,
+        pickle.UnpicklingError,
+    ) as exc:
+        raise DataValidationError(
+            f"cannot load Base classifier checkpoint {base_checkpoint}: {exc}"
+        ) from exc
+    required = {
+        "checkpoint_version",
+        "architecture",
+        "output_dimension",
+        "image_size",
+        "epoch",
+        "validation_loss",
+        "model_state_dict",
+        "optimizer_state_dict",
+        "context",
+    }
+    if not isinstance(payload, dict) or set(payload) != required:
+        raise DataValidationError("Base classifier checkpoint schema is invalid")
+    if (
+        payload["checkpoint_version"] != 1
+        or payload["architecture"] != "resnet18"
+        or payload["output_dimension"] != 15
+    ):
+        raise DataValidationError(
+            "Incremental initialization requires a 15-output Base checkpoint"
+        )
+    if payload["image_size"] != image_size:
+        raise DataValidationError("Base checkpoint image size does not match")
+    base_context = payload.get("context")
+    if not isinstance(base_context, dict):
+        raise DataValidationError("Base checkpoint context is invalid")
+    if base_context.get("registry_sha256") != checkpoint_context.get(
+        "registry_sha256"
+    ):
+        raise DataValidationError("Base checkpoint registry does not match")
+    base_mapping = base_context.get("model_index_mapping")
+    incremental_mapping = checkpoint_context.get("model_index_mapping")
+    if (
+        not isinstance(base_mapping, list)
+        or not isinstance(incremental_mapping, list)
+        or len(base_mapping) != 15
+        or len(incremental_mapping) != 20
+        or base_mapping != incremental_mapping[:15]
+    ):
+        raise DataValidationError("Base checkpoint model_index mapping does not match")
+
+    base_model = resnet18(weights=None)
+    base_model.fc = nn.Linear(base_model.fc.in_features, 15)
+    try:
+        base_model.load_state_dict(payload["model_state_dict"], strict=True)
+    except (RuntimeError, TypeError) as exc:
+        raise DataValidationError(
+            f"cannot strict-load Base classifier checkpoint: {exc}"
+        ) from exc
+    expanded = resnet18(weights=None)
+    expanded.fc = nn.Linear(expanded.fc.in_features, 20)
+    with torch.no_grad():
+        expanded_state = expanded.state_dict()
+        for key, tensor in base_model.state_dict().items():
+            if not key.startswith("fc."):
+                expanded_state[key].copy_(tensor)
+        expanded.load_state_dict(expanded_state, strict=True)
+        expanded.fc.weight[:15].copy_(base_model.fc.weight)
+        expanded.fc.bias[:15].copy_(base_model.fc.bias)
+    return expanded, {
+        "source_output_dimension": 15,
+        "target_output_dimension": 20,
+        "copied_base_rows": 15,
+        "new_rows": 5,
+    }
+
+
+def _balanced_class_statistics(
+    train_samples: Sequence[ClassifierSample], output_dimension: int
+) -> tuple[tuple[int, ...], tuple[float, ...]]:
+    if (
+        isinstance(output_dimension, bool)
+        or not isinstance(output_dimension, int)
+        or output_dimension <= 0
+    ):
+        raise DataValidationError("output_dimension must be a positive integer")
+    counts = [0] * output_dimension
+    for sample in train_samples:
+        if not isinstance(sample, ClassifierSample):
+            raise DataValidationError("train samples must be ClassifierSample values")
+        if not 0 <= sample.target_index < output_dimension:
+            raise DataValidationError(
+                f"classifier target is outside output dimension: {sample.target_index}"
+            )
+        counts[sample.target_index] += 1
+    if any(count == 0 for count in counts):
+        raise DataValidationError("classifier train split must support every output")
+    total = len(train_samples)
+    weights = tuple(total / (output_dimension * count) for count in counts)
+    return tuple(counts), weights
 
 
 class _ManifestImageDataset:
@@ -1087,18 +1219,32 @@ class TorchvisionClassifierBackend:
         if not len(train_loader) or not len(validation_loader):
             raise DataValidationError("classifier backend received an empty split")
 
-        model = _build_resnet18(pretrained_model, output_dimension).to(device)
-        counts = torch.zeros(output_dimension, dtype=torch.float32)
-        for sample in train_samples:
-            if not 0 <= sample.target_index < output_dimension:
-                raise DataValidationError(
-                    f"classifier target is outside output dimension: {sample.target_index}"
-                )
-            counts[sample.target_index] += 1
-        weights = torch.zeros_like(counts)
-        present = counts > 0
-        weights[present] = len(train_samples) / (output_dimension * counts[present])
-        criterion = nn.CrossEntropyLoss(weight=weights.to(device))
+        if output_dimension == 20:
+            model, _initialization = _build_incremental_resnet18(
+                pretrained_model,
+                output_dimension=output_dimension,
+                checkpoint_context=checkpoint_context,
+                image_size=image_size,
+            )
+        else:
+            model = _build_resnet18(pretrained_model, output_dimension)
+        model = model.to(device)
+        _counts, class_weights = _balanced_class_statistics(
+            train_samples, output_dimension
+        )
+        if tuple(arguments.get("class_counts", _counts)) != _counts:
+            raise DataValidationError("classifier class counts do not match samples")
+        recorded_weights = tuple(arguments.get("class_weights", class_weights))
+        if len(recorded_weights) != len(class_weights) or any(
+            not math.isclose(float(actual), expected, rel_tol=0.0, abs_tol=1e-12)
+            for actual, expected in zip(
+                recorded_weights, class_weights, strict=True
+            )
+        ):
+            raise DataValidationError("classifier class weights do not match samples")
+        criterion = nn.CrossEntropyLoss(
+            weight=torch.tensor(recorded_weights, dtype=torch.float32, device=device)
+        )
         optimizer = torch.optim.AdamW(
             model.parameters(), lr=learning_rate, weight_decay=weight_decay
         )

@@ -19,6 +19,8 @@ from bakery_scanner.classifier_training import (
     ClassifierTrainingConfig,
     IncrementalClassifierTrainingConfig,
     TorchvisionClassifierBackend,
+    _balanced_class_statistics,
+    _build_incremental_resnet18,
     _build_resnet18,
     load_classifier_experiment_config,
     load_classifier_training_config,
@@ -310,7 +312,10 @@ def test_train_classifier_publishes_complete_reproducible_run(
     assert {sample.split for sample in backend.train_call["validation_samples"]} == {
         "validation"
     }
-    assert backend.train_call["arguments"] == {
+    arguments = dict(backend.train_call["arguments"])
+    class_counts = arguments.pop("class_counts")
+    class_weights = arguments.pop("class_weights")
+    assert arguments == {
         "architecture": "resnet18",
         "image_size": 224,
         "epochs": 3,
@@ -322,6 +327,9 @@ def test_train_classifier_publishes_complete_reproducible_run(
         "learning_rate": 0.001,
         "weight_decay": 0.0001,
     }
+    assert len(class_counts) == 15
+    assert len(class_weights) == 15
+    assert all(count > 0 for count in class_counts)
     metadata = json.loads(report.metadata_path.read_text(encoding="utf-8"))
     metrics = json.loads(report.metrics_path.read_text(encoding="utf-8"))
     assert metadata["dataset"]["output_dimension"] == 15
@@ -338,6 +346,11 @@ def test_train_classifier_publishes_complete_reproducible_run(
     assert metadata["environment"]["python"]
     assert metadata["environment"]["dependencies"]["torch"]
     assert metadata["dataset"]["registry_sha256"]
+    assert metadata["class_balance"] == {
+        "formula": "train_samples / (output_dimension * class_count)",
+        "class_counts": list(class_counts),
+        "class_weights": list(class_weights),
+    }
     assert metadata["determinism"] == {
         "python_seeded": True,
         "torch_seeded": True,
@@ -427,6 +440,141 @@ def test_build_resnet18_strictly_loads_imagenet_state_and_replaces_head(
     torch.save({"conv1.weight": model.conv1.weight.detach()}, invalid)
     with pytest.raises(DataValidationError, match="strict"):
         _build_resnet18(invalid, output_dimension=15)
+
+
+def _incremental_checkpoint_fixture(tmp_path: Path):
+    import torch
+    from torch import nn
+    from torchvision.models import resnet18
+
+    base_model = resnet18(weights=None)
+    base_model.fc = nn.Linear(base_model.fc.in_features, 15)
+    with torch.no_grad():
+        base_model.fc.weight.copy_(
+            torch.arange(base_model.fc.weight.numel(), dtype=torch.float32).reshape_as(
+                base_model.fc.weight
+            )
+            / 1000
+        )
+        base_model.fc.bias.copy_(torch.arange(15, dtype=torch.float32))
+    mapping = [
+        {
+            "model_index": index,
+            "category_id": 100 + index,
+            "canonical_name": f"class-{index}",
+        }
+        for index in range(20)
+    ]
+    base_context = {
+        "context_version": 1,
+        "source_manifest_sha256": "a" * 64,
+        "registry_sha256": "b" * 64,
+        "model_index_mapping": mapping[:15],
+        "config": {"run_name": "base"},
+    }
+    checkpoint = tmp_path / "base-best.pt"
+    torch.save(
+        {
+            "checkpoint_version": 1,
+            "architecture": "resnet18",
+            "output_dimension": 15,
+            "image_size": 224,
+            "epoch": 3,
+            "validation_loss": 0.5,
+            "model_state_dict": base_model.state_dict(),
+            "optimizer_state_dict": {},
+            "context": base_context,
+        },
+        checkpoint,
+    )
+    incremental_context = {
+        **base_context,
+        "source_manifest_sha256": "c" * 64,
+        "model_index_mapping": mapping,
+        "config": {"run_name": "incremental"},
+    }
+    return checkpoint, base_model, incremental_context
+
+
+def test_incremental_resnet18_copies_backbone_and_first_fifteen_head_rows(
+    tmp_path: Path,
+) -> None:
+    import torch
+
+    checkpoint, base_model, context = _incremental_checkpoint_fixture(tmp_path)
+
+    expanded, evidence = _build_incremental_resnet18(
+        checkpoint,
+        output_dimension=20,
+        checkpoint_context=context,
+        image_size=224,
+    )
+
+    for key, tensor in base_model.state_dict().items():
+        if not key.startswith("fc."):
+            assert torch.equal(expanded.state_dict()[key], tensor)
+    assert torch.equal(expanded.fc.weight[:15], base_model.fc.weight)
+    assert torch.equal(expanded.fc.bias[:15], base_model.fc.bias)
+    assert expanded.fc.out_features == 20
+    assert evidence == {
+        "source_output_dimension": 15,
+        "target_output_dimension": 20,
+        "copied_base_rows": 15,
+        "new_rows": 5,
+    }
+
+
+@pytest.mark.parametrize(
+    "mutation,message",
+    [
+        ("dimension", "20 outputs"),
+        ("registry", "registry"),
+        ("mapping", "mapping"),
+        ("image_size", "image size"),
+    ],
+)
+def test_incremental_resnet18_rejects_incompatible_base_checkpoint(
+    tmp_path: Path, mutation: str, message: str
+) -> None:
+    import torch
+
+    checkpoint, _base_model, context = _incremental_checkpoint_fixture(tmp_path)
+    output_dimension = 20
+    image_size = 224
+    if mutation == "dimension":
+        output_dimension = 19
+    elif mutation == "registry":
+        context = {**context, "registry_sha256": "d" * 64}
+    elif mutation == "mapping":
+        mapping = list(context["model_index_mapping"])
+        mapping[0] = {**mapping[0], "canonical_name": "changed"}
+        context = {**context, "model_index_mapping": mapping}
+    elif mutation == "image_size":
+        image_size = 128
+
+    with pytest.raises(DataValidationError, match=message):
+        _build_incremental_resnet18(
+            checkpoint,
+            output_dimension=output_dimension,
+            checkpoint_context=context,
+            image_size=image_size,
+        )
+
+
+def test_balanced_class_statistics_require_support_and_match_formula(
+    tmp_path: Path,
+) -> None:
+    samples = tuple(
+        ClassifierSample(str(index), tmp_path / str(index), target, "train")
+        for index, target in enumerate((0, 0, 0, 0, 1, 1, 2))
+    )
+
+    counts, weights = _balanced_class_statistics(samples, output_dimension=3)
+
+    assert counts == (4, 2, 1)
+    assert weights == pytest.approx((7 / 12, 7 / 6, 7 / 3))
+    with pytest.raises(DataValidationError, match="every output"):
+        _balanced_class_statistics(samples[:-1], output_dimension=3)
 
 
 def _tiny_samples(tmp_path: Path, split: str, count: int) -> tuple[ClassifierSample, ...]:

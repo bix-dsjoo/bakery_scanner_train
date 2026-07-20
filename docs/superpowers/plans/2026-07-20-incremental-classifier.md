@@ -184,7 +184,7 @@ git commit -m "feat(classifier): Incremental 설정과 단계별 지표를 추�
 - Produces: `_balanced_class_statistics(train_samples, output_dimension) -> tuple[counts, weights]`.
 - Changes backend input name from `pretrained_model` to `initial_model` while keeping Base behavior identical.
 
-- [ ] **Step 1: Write failing exact 15-to-20 expansion tests**
+- [x] **Step 1: Write failing exact 15-to-20 expansion tests**
 
 Create a valid 15-output checkpoint payload with distinctive backbone tensors and head rows. Build the 20-output model and assert:
 
@@ -199,17 +199,17 @@ assert expanded.fc.weight.shape[0] == 20
 
 Add rejection tests for output dimension other than 20, malformed schema, Base output other than 15, registry SHA mismatch, first-15 mapping mismatch, and image-size mismatch.
 
-- [ ] **Step 2: Write failing balance-statistics tests**
+- [x] **Step 2: Write failing balance-statistics tests**
 
 For counts `[4, 2, 1]`, require weights `[7/(3*4), 7/(3*2), 7/(3*1)]`. Reject an output index outside range and any class with zero train support.
 
-- [ ] **Step 3: Run the new tests and confirm RED**
+- [x] **Step 3: Run the new tests and confirm RED**
 
 Run: `python -m pytest tests/test_classifier_training.py -q`
 
 Expected: failures for missing expansion and balance functions.
 
-- [ ] **Step 4: Implement strict checkpoint expansion**
+- [x] **Step 4: Implement strict checkpoint expansion**
 
 Reuse the existing checkpoint schema validator. Load a 15-output ResNet18 strictly, create the seeded 20-output model, copy non-head state and rows 0 through 14 under `torch.no_grad()`, then return the model plus initialization evidence:
 
@@ -222,17 +222,17 @@ Reuse the existing checkpoint schema validator. Load a 15-output ResNet18 strict
 }
 ```
 
-- [ ] **Step 5: Use one balancing implementation for metadata and loss**
+- [x] **Step 5: Use one balancing implementation for metadata and loss**
 
 Compute counts and weights before backend invocation, pass the immutable weights in backend arguments, and construct `CrossEntropyLoss` from those exact values. Record counts and weights in metadata.
 
-- [ ] **Step 6: Run classifier tests**
+- [x] **Step 6: Run classifier tests**
 
 Run: `python -m pytest tests/test_classifier_training.py tests/test_classifier_evaluation.py -q`
 
 Expected: all tests pass, including legacy `_build_resnet18` and Base training tests.
 
-- [ ] **Step 7: Commit expansion and weighting**
+- [x] **Step 7: Commit expansion and weighting**
 
 ```powershell
 git add src/bakery_scanner/classifier_training.py tests/test_classifier_training.py
