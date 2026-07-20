@@ -1,0 +1,15 @@
+dataset_root: datasets
+source_classifier_run: base_seed42
+output_root: runs/classifier
+run_name: resnet18_base_seed42
+architecture: resnet18
+pretrained_model: models/pretrained/resnet18-f37072fd.pth
+image_size: 224
+epochs: 30
+batch_size: 64
+seed: 42
+device: "0"
+patience: 5
+workers: 8
+learning_rate: 0.001
+weight_decay: 0.0001

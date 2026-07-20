@@ -13,7 +13,8 @@ datasets/derived/detector/
 datasets/derived/yolo/
 datasets/derived/classifier/
 
-# Downloaded pretrained weights and completed detector runs are local artifacts.
+# Downloaded pretrained weights and completed training runs are local artifacts.
 models/pretrained/
 runs/detector/
+runs/classifier/
 *.pt
