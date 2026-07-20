@@ -1,0 +1,11 @@
+dataset_root: datasets
+detector_config: configs/detector/yolo11n_base.yaml
+classifier_config: configs/classifier/resnet18_incremental.yaml
+detector_checkpoint: runs/detector/yolo11n_base_seed42/checkpoints/best.pt
+classifier_checkpoint: runs/classifier/resnet18_incremental_seed42/checkpoints/best.pt
+output_root: runs/benchmark
+run_name: incremental_resnet18_cpu
+warmup_iterations: 5
+repetitions: 30
+intra_op_threads: 4
+inter_op_threads: 1
