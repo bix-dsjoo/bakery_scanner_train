@@ -8,7 +8,11 @@ version = "0.1.0"
 description = "Dataset validation, synthetic scenes, and detector-data foundation for Bakery Scanner"
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = ["Pillow>=12,<13"]
+dependencies = [
+  "Pillow>=12,<13",
+  "PyYAML>=6,<7",
+  "ultralytics>=8.4,<9",
+]
 
 [project.optional-dependencies]
 test = ["pytest>=9,<10"]
@@ -17,6 +21,7 @@ test = ["pytest>=9,<10"]
 bakery-audit = "bakery_scanner.cli:main"
 bakery-synthetic = "bakery_scanner.synthetic_cli:main"
 bakery-detector-data = "bakery_scanner.detector_cli:main"
+bakery-detector = "bakery_scanner.detector_train_cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
