@@ -55,14 +55,37 @@ def _print_human(
     print(f"  Macro F1: {metrics['macro_f1']:.6f}")
 
 
+def _print_preflight(args, config) -> None:
+    dataset_root = Path(config.dataset_root).resolve(strict=False)
+    source_run = (
+        dataset_root / "derived" / "classifier" / config.source_classifier_run
+    )
+    pretrained = Path(config.pretrained_model).resolve(strict=False)
+    if args.command == "train":
+        output = (
+            Path(config.output_root).resolve(strict=False) / config.run_name
+        )
+    else:
+        checkpoint = args.checkpoint.resolve(strict=False)
+        output = (
+            args.output_dir.resolve(strict=False)
+            if args.output_dir is not None
+            else checkpoint.parent.parent / "evaluation"
+        )
+        print(f"Classifier checkpoint: {checkpoint}", file=sys.stderr)
+    print(f"Classifier dataset root: {dataset_root}", file=sys.stderr)
+    print(f"Classifier source run: {source_run}", file=sys.stderr)
+    print("Classifier train split: train", file=sys.stderr)
+    print("Classifier validation split: validation (train-side)", file=sys.stderr)
+    print(f"Classifier pretrained model: {pretrained}", file=sys.stderr)
+    print(f"Classifier output: {output}", file=sys.stderr)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
         config = load_classifier_training_config(args.config)
-        print(
-            "Classifier train split: train; validation split: validation (train-side)",
-            file=sys.stderr,
-        )
+        _print_preflight(args, config)
         if args.command == "train":
             report = train_classifier(config)
             action = "training"

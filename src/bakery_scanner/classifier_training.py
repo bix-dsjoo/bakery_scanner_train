@@ -5,6 +5,7 @@ import importlib.metadata
 import json
 import math
 import os
+import pickle
 import platform
 import random
 import re
@@ -26,6 +27,7 @@ from .classifier_evaluation import (
     evaluate_classifier_predictions,
 )
 from .errors import DataValidationError
+from .registry import load_class_registry
 from .safety import assert_training_paths_safe
 
 _RUN_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
@@ -112,6 +114,7 @@ class ClassifierBackend(Protocol):
         train_samples: Sequence[ClassifierSample],
         validation_samples: Sequence[ClassifierSample],
         output_dimension: int,
+        checkpoint_context: Mapping[str, Any],
         output_dir: Path,
         arguments: Mapping[str, object],
     ) -> BackendTrainingResult: ...
@@ -122,6 +125,7 @@ class ClassifierBackend(Protocol):
         checkpoint: Path,
         samples: Sequence[ClassifierSample],
         output_dimension: int,
+        checkpoint_context: Mapping[str, Any],
         arguments: Mapping[str, object],
     ) -> Sequence[ClassifierPrediction]: ...
 
@@ -364,12 +368,50 @@ def _backend_arguments(config: ClassifierTrainingConfig) -> dict[str, object]:
     }
 
 
+def _checkpoint_context(
+    config: ClassifierTrainingConfig,
+    dataset_root: Path,
+    manifest_path: Path,
+    output_dimension: int,
+) -> dict[str, Any]:
+    manifest = _json_object(manifest_path, "classifier manifest")
+    registry_payload = manifest.get("registry")
+    if not isinstance(registry_payload, dict):
+        raise DataValidationError("classifier manifest registry must be an object")
+    registry_sha256 = registry_payload.get("sha256")
+    if not isinstance(registry_sha256, str) or len(registry_sha256) != 64:
+        raise DataValidationError("classifier manifest registry SHA-256 is invalid")
+    registry = load_class_registry(dataset_root / "class_registry.json")
+    mapping = []
+    for model_index in range(output_dimension):
+        record = registry.by_model_index.get(model_index)
+        if record is None:
+            raise DataValidationError(
+                f"class registry is missing model_index {model_index}"
+            )
+        mapping.append(
+            {
+                "model_index": record.model_index,
+                "category_id": record.category_id,
+                "canonical_name": record.canonical_name,
+            }
+        )
+    return {
+        "context_version": 1,
+        "source_manifest_sha256": _sha256(manifest_path),
+        "registry_sha256": registry_sha256,
+        "model_index_mapping": mapping,
+        "config": _config_payload(config),
+    }
+
+
 def _write_evaluation(
     *,
     backend: ClassifierBackend,
     checkpoint: Path,
     samples: Sequence[ClassifierSample],
     output_dimension: int,
+    checkpoint_context: Mapping[str, Any],
     arguments: Mapping[str, object],
     output_dir: Path,
 ) -> tuple[Path, Path]:
@@ -378,6 +420,7 @@ def _write_evaluation(
             checkpoint=checkpoint,
             samples=samples,
             output_dimension=output_dimension,
+            checkpoint_context=checkpoint_context,
             arguments=arguments,
         )
     )
@@ -416,6 +459,7 @@ def _write_evaluation(
         json.dumps(
             {
                 "split": "validation",
+                "metric_version": 1,
                 "checkpoint_sha256": _sha256(checkpoint),
                 "metrics": metrics,
             },
@@ -461,10 +505,11 @@ def train_classifier(
     source_dir = (
         dataset_root / "derived" / "classifier" / config.source_classifier_run
     )
+    registry_path = dataset_root / "class_registry.json"
     output_root = Path(config.output_root).resolve(strict=False)
     pretrained_model = Path(config.pretrained_model).resolve(strict=False)
     assert_training_paths_safe(
-        [source_dir, output_root, pretrained_model], dataset_root
+        [source_dir, registry_path, output_root, pretrained_model], dataset_root
     )
 
     dataset_report = validate_classifier_dataset(
@@ -482,6 +527,12 @@ def train_classifier(
         raise DataValidationError(f"CUDA device {config.device} is unavailable")
 
     samples = _load_samples(dataset_root, dataset_report.manifest_path)
+    checkpoint_context = _checkpoint_context(
+        config,
+        dataset_root,
+        dataset_report.manifest_path,
+        dataset_report.output_dimension,
+    )
     train_samples = tuple(sample for sample in samples if sample.split == "train")
     validation_samples = tuple(
         sample for sample in samples if sample.split == "validation"
@@ -502,6 +553,7 @@ def train_classifier(
             train_samples=train_samples,
             validation_samples=validation_samples,
             output_dimension=dataset_report.output_dimension,
+            checkpoint_context=checkpoint_context,
             output_dir=staging_dir / "backend",
             arguments=arguments,
         )
@@ -523,6 +575,7 @@ def train_classifier(
             checkpoint=best_checkpoint,
             samples=validation_samples,
             output_dimension=dataset_report.output_dimension,
+            checkpoint_context=checkpoint_context,
             arguments=arguments,
             output_dir=staging_dir,
         )
@@ -557,6 +610,10 @@ def train_classifier(
                     "dataset": {
                         "manifest_path": str(dataset_report.manifest_path),
                         "manifest_sha256": _sha256(dataset_report.manifest_path),
+                        "registry_sha256": checkpoint_context["registry_sha256"],
+                        "model_index_mapping": checkpoint_context[
+                            "model_index_mapping"
+                        ],
                         "source_run": config.source_classifier_run,
                         "phase": dataset_report.phase,
                         "output_dimension": dataset_report.output_dimension,
@@ -576,6 +633,14 @@ def train_classifier(
                         "selection_metric": "validation_loss",
                     },
                     "environment": _environment_metadata(),
+                    "determinism": {
+                        "python_seeded": True,
+                        "torch_seeded": True,
+                        "cuda_seeded": True,
+                        "cudnn_benchmark": False,
+                        "cudnn_deterministic": True,
+                        "torch_deterministic_algorithms": False,
+                    },
                     "preprocessing": _PREPROCESSING_METADATA,
                     "backend_arguments": arguments,
                 },
@@ -616,6 +681,7 @@ def evaluate_classifier_checkpoint(
     source_dir = (
         dataset_root / "derived" / "classifier" / config.source_classifier_run
     )
+    registry_path = dataset_root / "class_registry.json"
     checkpoint_path = Path(checkpoint).resolve(strict=False)
     target_dir = (
         Path(output_dir).resolve(strict=False)
@@ -623,7 +689,7 @@ def evaluate_classifier_checkpoint(
         else checkpoint_path.parent.parent / "evaluation"
     )
     assert_training_paths_safe(
-        [source_dir, checkpoint_path, target_dir], dataset_root
+        [source_dir, registry_path, checkpoint_path, target_dir], dataset_root
     )
     dataset_report = validate_classifier_dataset(
         dataset_root, config.source_classifier_run
@@ -639,6 +705,12 @@ def evaluate_classifier_checkpoint(
     if not selected_backend.cuda_available(config.device):
         raise DataValidationError(f"CUDA device {config.device} is unavailable")
     samples = _load_samples(dataset_root, dataset_report.manifest_path)
+    checkpoint_context = _checkpoint_context(
+        config,
+        dataset_root,
+        dataset_report.manifest_path,
+        dataset_report.output_dimension,
+    )
     validation_samples = tuple(
         sample for sample in samples if sample.split == "validation"
     )
@@ -655,6 +727,7 @@ def evaluate_classifier_checkpoint(
             checkpoint=checkpoint_path,
             samples=validation_samples,
             output_dimension=dataset_report.output_dimension,
+            checkpoint_context=checkpoint_context,
             arguments=_backend_arguments(config),
             output_dir=target_dir,
         )
@@ -682,7 +755,14 @@ def _build_resnet18(pretrained_model: Path, output_dimension: int):
             pretrained_model, map_location="cpu", weights_only=True
         )
         model.load_state_dict(state_dict, strict=True)
-    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+    except (
+        OSError,
+        RuntimeError,
+        TypeError,
+        ValueError,
+        EOFError,
+        pickle.UnpicklingError,
+    ) as exc:
         raise DataValidationError(
             f"cannot strict-load ResNet18 pretrained state {pretrained_model}: {exc}"
         ) from exc
@@ -773,6 +853,7 @@ def _checkpoint_payload(
     image_size: int,
     epoch: int,
     validation_loss: float,
+    checkpoint_context: Mapping[str, Any],
 ) -> dict[str, Any]:
     return {
         "checkpoint_version": 1,
@@ -783,6 +864,7 @@ def _checkpoint_payload(
         "validation_loss": validation_loss,
         "model_state_dict": model.state_dict(),
         "optimizer_state_dict": optimizer.state_dict(),
+        "context": dict(checkpoint_context),
     }
 
 
@@ -799,6 +881,7 @@ class TorchvisionClassifierBackend:
         train_samples: Sequence[ClassifierSample],
         validation_samples: Sequence[ClassifierSample],
         output_dimension: int,
+        checkpoint_context: Mapping[str, Any],
         output_dir: Path,
         arguments: Mapping[str, object],
     ) -> BackendTrainingResult:
@@ -897,8 +980,9 @@ class TorchvisionClassifierBackend:
             validation_loss_sum = 0.0
             validation_correct = 0
             validation_count = 0
+            validation_predictions: list[ClassifierPrediction] = []
             with torch.inference_mode():
-                for images, targets, _sample_ids in validation_loader:
+                for images, targets, sample_ids in validation_loader:
                     images = images.to(device, non_blocking=True)
                     targets = targets.to(device, non_blocking=True)
                     logits = model(images)
@@ -909,7 +993,27 @@ class TorchvisionClassifierBackend:
                         (logits.argmax(dim=1) == targets).sum()
                     )
                     validation_count += count
+                    probabilities = logits.softmax(dim=1)
+                    confidences, predicted_indices = probabilities.max(dim=1)
+                    for sample_id, target, predicted, confidence in zip(
+                        sample_ids,
+                        targets.cpu().tolist(),
+                        predicted_indices.cpu().tolist(),
+                        confidences.cpu().tolist(),
+                        strict=True,
+                    ):
+                        validation_predictions.append(
+                            ClassifierPrediction(
+                                sample_id=sample_id,
+                                target_index=target,
+                                predicted_index=predicted,
+                                confidence=confidence,
+                            )
+                        )
             validation_loss = validation_loss_sum / validation_count
+            validation_metrics = evaluate_classifier_predictions(
+                validation_predictions, output_dimension=output_dimension
+            )
             history.append(
                 {
                     "epoch": epoch,
@@ -919,6 +1023,10 @@ class TorchvisionClassifierBackend:
                     "validation_top1_accuracy": (
                         validation_correct / validation_count
                     ),
+                    "validation_macro_f1": validation_metrics["macro_f1"],
+                    "validation_evaluated_class_count": validation_metrics[
+                        "evaluated_class_count"
+                    ],
                 }
             )
             checkpoint = _checkpoint_payload(
@@ -928,6 +1036,7 @@ class TorchvisionClassifierBackend:
                 image_size=image_size,
                 epoch=epoch,
                 validation_loss=validation_loss,
+                checkpoint_context=checkpoint_context,
             )
             torch.save(checkpoint, last_checkpoint)
             if validation_loss < best_loss:
@@ -956,6 +1065,7 @@ class TorchvisionClassifierBackend:
         checkpoint: Path,
         samples: Sequence[ClassifierSample],
         output_dimension: int,
+        checkpoint_context: Mapping[str, Any],
         arguments: Mapping[str, object],
     ) -> Sequence[ClassifierPrediction]:
         import torch
@@ -969,7 +1079,14 @@ class TorchvisionClassifierBackend:
         workers = _argument_integer(arguments, "workers", allow_zero=True)
         try:
             payload = torch.load(checkpoint, map_location="cpu", weights_only=True)
-        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        except (
+            OSError,
+            RuntimeError,
+            TypeError,
+            ValueError,
+            EOFError,
+            pickle.UnpicklingError,
+        ) as exc:
             raise DataValidationError(
                 f"cannot load classifier checkpoint {checkpoint}: {exc}"
             ) from exc
@@ -982,6 +1099,7 @@ class TorchvisionClassifierBackend:
             "validation_loss",
             "model_state_dict",
             "optimizer_state_dict",
+            "context",
         }
         if not isinstance(payload, dict) or set(payload) != required:
             raise DataValidationError("classifier checkpoint schema is invalid")
@@ -990,15 +1108,16 @@ class TorchvisionClassifierBackend:
             or payload["architecture"] != "resnet18"
             or payload["output_dimension"] != output_dimension
             or payload["image_size"] != image_size
+            or payload["context"] != dict(checkpoint_context)
         ):
             raise DataValidationError(
-                "classifier checkpoint does not match evaluation configuration"
+                "classifier checkpoint context does not match evaluation configuration"
             )
         model = resnet18(weights=None)
         model.fc = nn.Linear(model.fc.in_features, output_dimension)
         try:
             model.load_state_dict(payload["model_state_dict"], strict=True)
-        except RuntimeError as exc:
+        except (RuntimeError, TypeError) as exc:
             raise DataValidationError(
                 f"cannot strict-load classifier checkpoint: {exc}"
             ) from exc

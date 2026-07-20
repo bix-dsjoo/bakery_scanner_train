@@ -238,6 +238,10 @@ def test_train_classifier_publishes_complete_reproducible_run(
     assert report.best_checkpoint.read_bytes() == b"best classifier"
     assert report.last_checkpoint.read_bytes() == b"last classifier"
     assert backend.train_call["output_dimension"] == 15
+    context = backend.train_call["checkpoint_context"]
+    assert context["context_version"] == 1
+    assert len(context["model_index_mapping"]) == 15
+    assert len(context["source_manifest_sha256"]) == 64
     assert {sample.split for sample in backend.train_call["train_samples"]} == {"train"}
     assert {sample.split for sample in backend.train_call["validation_samples"]} == {
         "validation"
@@ -257,6 +261,10 @@ def test_train_classifier_publishes_complete_reproducible_run(
     metadata = json.loads(report.metadata_path.read_text(encoding="utf-8"))
     metrics = json.loads(report.metrics_path.read_text(encoding="utf-8"))
     assert metadata["dataset"]["output_dimension"] == 15
+    assert context["source_manifest_sha256"] == metadata["dataset"][
+        "manifest_sha256"
+    ]
+    assert context["registry_sha256"] == metadata["dataset"]["registry_sha256"]
     assert metadata["model"]["pretrained_sha256"] == hashlib.sha256(
         b"official weights"
     ).hexdigest()
@@ -265,6 +273,15 @@ def test_train_classifier_publishes_complete_reproducible_run(
     ).hexdigest()
     assert metadata["environment"]["python"]
     assert metadata["environment"]["dependencies"]["torch"]
+    assert metadata["dataset"]["registry_sha256"]
+    assert metadata["determinism"] == {
+        "python_seeded": True,
+        "torch_seeded": True,
+        "cuda_seeded": True,
+        "cudnn_benchmark": False,
+        "cudnn_deterministic": True,
+        "torch_deterministic_algorithms": False,
+    }
     assert metadata["preprocessing"] == {
         "train": [
             "RandomResizedCrop(scale=[0.8,1.0])",
@@ -283,6 +300,7 @@ def test_train_classifier_publishes_complete_reproducible_run(
         "std": [0.229, 0.224, 0.225],
     }
     assert metrics["split"] == "validation"
+    assert metrics["metric_version"] == 1
     assert metrics["metrics"]["top1_accuracy"] == 1.0
 
 
@@ -387,6 +405,16 @@ def test_torchvision_backend_writes_checkpoint_schema_and_predicts_probabilities
         "learning_rate": 0.001,
         "weight_decay": 0.0001,
     }
+    checkpoint_context = {
+        "context_version": 1,
+        "source_manifest_sha256": "a" * 64,
+        "registry_sha256": "b" * 64,
+        "model_index_mapping": [
+            {"model_index": 0, "category_id": 10, "canonical_name": "zero"},
+            {"model_index": 1, "category_id": 20, "canonical_name": "one"},
+        ],
+        "config": {"run_name": "tiny"},
+    }
     backend = TorchvisionClassifierBackend()
 
     result = backend.train(
@@ -394,6 +422,7 @@ def test_torchvision_backend_writes_checkpoint_schema_and_predicts_probabilities
         train_samples=train_samples,
         validation_samples=validation_samples,
         output_dimension=2,
+        checkpoint_context=checkpoint_context,
         output_dir=tmp_path / "backend",
         arguments=arguments,
     )
@@ -408,14 +437,18 @@ def test_torchvision_backend_writes_checkpoint_schema_and_predicts_probabilities
         "validation_loss",
         "model_state_dict",
         "optimizer_state_dict",
+        "context",
     }
     assert best["architecture"] == "resnet18"
     assert best["output_dimension"] == 2
     assert result.best_epoch == 1
+    assert result.history[0]["validation_macro_f1"] is not None
+    assert result.history[0]["validation_evaluated_class_count"] == 2
     predictions = backend.predict(
         checkpoint=result.best_checkpoint,
         samples=validation_samples,
         output_dimension=2,
+        checkpoint_context=checkpoint_context,
         arguments=arguments,
     )
     assert [prediction.sample_id for prediction in predictions] == [
@@ -423,3 +456,36 @@ def test_torchvision_backend_writes_checkpoint_schema_and_predicts_probabilities
     ]
     assert all(0 <= prediction.confidence <= 1 for prediction in predictions)
     assert all(0 <= prediction.predicted_index < 2 for prediction in predictions)
+
+    mismatched_context = dict(checkpoint_context)
+    mismatched_context["source_manifest_sha256"] = "c" * 64
+    with pytest.raises(DataValidationError, match="context"):
+        backend.predict(
+            checkpoint=result.best_checkpoint,
+            samples=validation_samples,
+            output_dimension=2,
+            checkpoint_context=mismatched_context,
+            arguments=arguments,
+        )
+
+
+def test_torchvision_backend_wraps_corrupt_checkpoint_as_validation_error(
+    tmp_path: Path,
+) -> None:
+    checkpoint = tmp_path / "corrupt.pt"
+    checkpoint.write_bytes(b"not a torch checkpoint")
+    sample = _tiny_samples(tmp_path, "validation", 1)
+
+    with pytest.raises(DataValidationError, match="cannot load classifier checkpoint"):
+        TorchvisionClassifierBackend().predict(
+            checkpoint=checkpoint,
+            samples=sample,
+            output_dimension=2,
+            checkpoint_context={"context_version": 1},
+            arguments={
+                "image_size": 32,
+                "batch_size": 1,
+                "workers": 0,
+                "device": "cpu",
+            },
+        )

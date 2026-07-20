@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 from bakery_scanner import classifier_train_cli
 from bakery_scanner.classifier_training import (
@@ -35,12 +36,24 @@ def _training_report(tmp_path: Path) -> ClassifierTrainingReport:
     )
 
 
+def _config(tmp_path: Path):
+    return SimpleNamespace(
+        dataset_root=str(tmp_path / "datasets"),
+        source_classifier_run="base_seed42",
+        pretrained_model=str(tmp_path / "models" / "resnet18.pth"),
+        output_root=str(tmp_path / "runs" / "classifier"),
+        run_name="baseline",
+    )
+
+
 def test_train_cli_prints_validation_selection_and_json(
     tmp_path: Path, monkeypatch, capsys
 ) -> None:
     report = _training_report(tmp_path)
     monkeypatch.setattr(
-        classifier_train_cli, "load_classifier_training_config", lambda path: object()
+        classifier_train_cli,
+        "load_classifier_training_config",
+        lambda path: _config(tmp_path),
     )
     monkeypatch.setattr(
         classifier_train_cli, "train_classifier", lambda config: report
@@ -51,6 +64,10 @@ def test_train_cli_prints_validation_selection_and_json(
     output = captured.out
     assert "train split: train" in captured.err
     assert "validation split: validation" in captured.err
+    assert str((tmp_path / "datasets").resolve()) in captured.err
+    assert "base_seed42" in captured.err
+    assert str((tmp_path / "models" / "resnet18.pth").resolve()) in captured.err
+    assert str((tmp_path / "runs" / "classifier" / "baseline").resolve()) in captured.err
     assert "validation" in output
     assert "Top-1: 0.800000" in output
     assert "best.pt" in output
@@ -90,7 +107,9 @@ def test_evaluate_cli_passes_checkpoint_and_output_dir(
     )
     calls = []
     monkeypatch.setattr(
-        classifier_train_cli, "load_classifier_training_config", lambda path: object()
+        classifier_train_cli,
+        "load_classifier_training_config",
+        lambda path: _config(tmp_path),
     )
     monkeypatch.setattr(
         classifier_train_cli,
