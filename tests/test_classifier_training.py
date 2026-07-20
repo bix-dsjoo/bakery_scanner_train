@@ -144,6 +144,7 @@ class RecordingBackend:
         self.available = available
         self.fail = fail
         self.train_call = None
+        self.predict_calls = []
 
     def cuda_available(self, device: str) -> bool:
         return self.available and device == "0"
@@ -171,6 +172,7 @@ class RecordingBackend:
         )
 
     def predict(self, **kwargs):
+        self.predict_calls.append(kwargs)
         return tuple(
             ClassifierPrediction(
                 sample.sample_id,
@@ -505,6 +507,15 @@ def test_train_incremental_classifier_publishes_20_outputs_and_freezes_detector(
     assert backend.train_call["output_dimension"] == 20
     assert len(backend.train_call["checkpoint_context"]["model_index_mapping"]) == 20
     assert "detector_checkpoint" not in backend.train_call
+    assert (
+        "frozen_detector_checkpoint"
+        not in backend.train_call["checkpoint_context"]["config"]
+    )
+    assert backend.predict_calls
+    assert all(
+        "frozen_detector_checkpoint" not in call["checkpoint_context"]["config"]
+        for call in backend.predict_calls
+    )
     metadata = json.loads(report.metadata_path.read_text(encoding="utf-8"))
     metrics = json.loads(report.metrics_path.read_text(encoding="utf-8"))["metrics"]
     assert metadata["dataset"]["phase"] == "incremental"

@@ -384,6 +384,14 @@ def _config_payload(
     return {field: getattr(config, field) for field in fields}
 
 
+def _backend_config_payload(
+    config: ClassifierTrainingConfig | IncrementalClassifierTrainingConfig,
+) -> dict[str, Any]:
+    payload = _config_payload(config)
+    payload.pop("frozen_detector_checkpoint", None)
+    return payload
+
+
 def _checkpoint_metadata(
     checkpoint: Path, label: str
 ) -> tuple[Path, dict[str, Any]]:
@@ -548,7 +556,7 @@ def _checkpoint_context(
         "source_manifest_sha256": _sha256(manifest_path),
         "registry_sha256": registry_sha256,
         "model_index_mapping": mapping,
-        "config": _config_payload(config),
+        "config": _backend_config_payload(config),
     }
 
 
