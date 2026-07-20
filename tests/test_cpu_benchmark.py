@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -12,6 +13,7 @@ from bakery_scanner.cpu_benchmark import (
     CpuBackendResult,
     CpuBenchmarkConfig,
     PreparedCpuBenchmark,
+    TorchCpuBenchmarkBackend,
     _percentile,
     _timing_statistics,
     _validate_backend_result,
@@ -279,3 +281,141 @@ def test_run_cpu_benchmark_rejects_test_path_before_prepare(tmp_path: Path) -> N
 
     with pytest.raises(DataValidationError, match="evaluation-only"):
         run_cpu_benchmark(config, _RecordingBackend())
+
+
+class _StepClock:
+    def __init__(self) -> None:
+        self.value = -1_000_000
+
+    def __call__(self) -> int:
+        self.value += 1_000_000
+        return self.value
+
+
+class _FakeDetector:
+    names = {0: "bread"}
+
+    def __init__(self, torch_module) -> None:
+        self.torch = torch_module
+        self.calls = []
+
+    def predict(self, **kwargs):
+        self.calls.append(kwargs)
+        if Path(kwargs["source"]).stem == "scene-b":
+            xyxy = self.torch.empty((0, 4), dtype=self.torch.float32)
+            conf = self.torch.empty((0,), dtype=self.torch.float32)
+            cls = self.torch.empty((0,), dtype=self.torch.float32)
+        else:
+            xyxy = self.torch.tensor([[1.0, 2.0, 12.0, 14.0]])
+            conf = self.torch.tensor([0.8])
+            cls = self.torch.tensor([0.0])
+        return [SimpleNamespace(boxes=SimpleNamespace(xyxy=xyxy, conf=conf, cls=cls))]
+
+
+def test_torch_cpu_backend_uses_cpu_and_excludes_warmup(tmp_path: Path) -> None:
+    import torch
+    from PIL import Image
+
+    image_paths = (tmp_path / "scene-a.jpg", tmp_path / "scene-b.jpg")
+    for image_path in image_paths:
+        Image.new("RGB", (20, 20), (20, 30, 40)).save(image_path)
+    detector = _FakeDetector(torch)
+
+    class FakeClassifier(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.anchor = torch.nn.Parameter(torch.zeros(1))
+            self.calls = []
+
+        def forward(self, batch):
+            self.calls.append(batch)
+            assert batch.device.type == "cpu"
+            logits = torch.zeros((batch.shape[0], 20), device=batch.device)
+            logits[:, 3] = 1.0
+            return logits
+
+    classifier = FakeClassifier().cpu().eval()
+    loader_calls = []
+
+    def classifier_loader(*args, **kwargs):
+        loader_calls.append((args, kwargs))
+        assert kwargs["device"].type == "cpu"
+        return classifier
+
+    backend = TorchCpuBenchmarkBackend(
+        clock_ns=_StepClock(),
+        detector_factory=lambda _checkpoint: detector,
+        classifier_loader=classifier_loader,
+        transform_factory=lambda _size: (
+            lambda _image: torch.ones((3, 8, 8), dtype=torch.float32)
+        ),
+        thread_configurer=lambda intra, inter: (intra, inter),
+    )
+
+    result = backend.run(
+        image_paths=image_paths,
+        image_ids=("scene-a", "scene-b"),
+        detector_checkpoint=tmp_path / "detector.pt",
+        classifier_checkpoint=tmp_path / "classifier.pt",
+        classifier_context={"fixture": True},
+        output_dimension=20,
+        detector_image_size=640,
+        classifier_image_size=224,
+        detector_confidence=0.25,
+        detector_nms_iou=0.7,
+        warmup_iterations=1,
+        repetitions=2,
+        intra_op_threads=4,
+        inter_op_threads=1,
+    )
+
+    assert result.runtime == "pytorch"
+    assert result.execution_provider == "CPU"
+    assert result.device == "cpu"
+    assert result.warmup_invocation_count == 2
+    assert result.measured_image_ids == (
+        "scene-a",
+        "scene-b",
+        "scene-a",
+        "scene-b",
+    )
+    assert result.classifier_batch_sizes == (1, 0, 1, 0)
+    assert all(len(result.stage_samples_ms[stage]) == 4 for stage in BENCHMARK_STAGES)
+    assert result.stage_samples_ms["classifier_batch"] == (1.0, 0.0, 1.0, 0.0)
+    assert len(detector.calls) == 6
+    assert all(call["device"] == "cpu" for call in detector.calls)
+    assert all(call["conf"] == 0.25 for call in detector.calls)
+    assert all(call["imgsz"] == 640 for call in detector.calls)
+    assert len(classifier.calls) == 3
+    assert loader_calls
+
+
+def test_torch_cpu_backend_rejects_non_bread_detector(tmp_path: Path) -> None:
+    import torch
+
+    detector = _FakeDetector(torch)
+    detector.names = {0: "other"}
+    backend = TorchCpuBenchmarkBackend(
+        detector_factory=lambda _checkpoint: detector,
+        classifier_loader=lambda *args, **kwargs: torch.nn.Linear(1, 1),
+        transform_factory=lambda _size: lambda _image: torch.ones((1,)),
+        thread_configurer=lambda intra, inter: (intra, inter),
+    )
+
+    with pytest.raises(DataValidationError, match="one bread class"):
+        backend.run(
+            image_paths=(tmp_path / "scene.jpg",),
+            image_ids=("scene",),
+            detector_checkpoint=tmp_path / "detector.pt",
+            classifier_checkpoint=tmp_path / "classifier.pt",
+            classifier_context={},
+            output_dimension=20,
+            detector_image_size=640,
+            classifier_image_size=224,
+            detector_confidence=0.25,
+            detector_nms_iou=0.7,
+            warmup_iterations=1,
+            repetitions=1,
+            intra_op_threads=4,
+            inter_op_threads=1,
+        )

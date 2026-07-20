@@ -9,12 +9,13 @@ import platform
 import re
 import shutil
 import sys
+import time
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Protocol, Sequence
+from typing import Any, Callable, Protocol, Sequence
 
 import yaml
 
@@ -720,5 +721,268 @@ def run_cpu_benchmark(
 
 
 class TorchCpuBenchmarkBackend:
-    def run(self, **_kwargs) -> CpuBackendResult:
-        raise NotImplementedError("native PyTorch CPU benchmark backend is not implemented")
+    def __init__(
+        self,
+        *,
+        clock_ns: Callable[[], int] | None = None,
+        detector_factory: Callable[[Path], Any] | None = None,
+        classifier_loader: Callable[..., Any] | None = None,
+        transform_factory: Callable[[int], Any] | None = None,
+        thread_configurer: Callable[[int, int], tuple[int, int]] | None = None,
+    ) -> None:
+        self._clock_ns = clock_ns or time.perf_counter_ns
+        self._detector_factory = detector_factory or self._default_detector_factory
+        self._classifier_loader = classifier_loader or self._default_classifier_loader
+        self._transform_factory = transform_factory or self._default_transform_factory
+        self._thread_configurer = thread_configurer or self._configure_threads
+
+    @staticmethod
+    def _default_detector_factory(checkpoint: Path):
+        from ultralytics import YOLO
+
+        return YOLO(str(checkpoint))
+
+    @staticmethod
+    def _default_classifier_loader(*args, **kwargs):
+        from .classifier_training import _load_classifier_checkpoint_model
+
+        return _load_classifier_checkpoint_model(*args, **kwargs)
+
+    @staticmethod
+    def _default_transform_factory(image_size: int):
+        from .classifier_training import _classifier_transforms
+
+        _train_transform, validation_transform = _classifier_transforms(image_size)
+        return validation_transform
+
+    @staticmethod
+    def _configure_threads(intra_op_threads: int, inter_op_threads: int) -> tuple[int, int]:
+        import torch
+
+        torch.set_num_threads(intra_op_threads)
+        try:
+            torch.set_num_interop_threads(inter_op_threads)
+        except RuntimeError as exc:
+            if torch.get_num_interop_threads() != inter_op_threads:
+                raise DataValidationError(
+                    "cannot apply configured PyTorch inter-op thread count"
+                ) from exc
+        effective = (torch.get_num_threads(), torch.get_num_interop_threads())
+        if effective != (intra_op_threads, inter_op_threads):
+            raise DataValidationError(
+                "effective PyTorch CPU thread counts do not match config"
+            )
+        return effective
+
+    @staticmethod
+    def _require_cpu_module(module: Any) -> None:
+        parameters = tuple(module.parameters()) if hasattr(module, "parameters") else ()
+        buffers = tuple(module.buffers()) if hasattr(module, "buffers") else ()
+        if any(value.device.type != "cpu" for value in (*parameters, *buffers)):
+            raise DataValidationError("classifier model must be entirely on CPU")
+
+    def run(
+        self,
+        *,
+        image_paths: Sequence[Path],
+        image_ids: Sequence[str],
+        detector_checkpoint: Path,
+        classifier_checkpoint: Path,
+        classifier_context: Mapping[str, Any],
+        output_dimension: int,
+        detector_image_size: int,
+        classifier_image_size: int,
+        detector_confidence: float,
+        detector_nms_iou: float,
+        warmup_iterations: int,
+        repetitions: int,
+        intra_op_threads: int,
+        inter_op_threads: int,
+    ) -> CpuBackendResult:
+        import torch
+        from PIL import Image, UnidentifiedImageError
+
+        if len(image_paths) != len(image_ids) or not image_ids:
+            raise DataValidationError("CPU benchmark images and IDs must be non-empty")
+        if output_dimension != 20:
+            raise DataValidationError("CPU benchmark classifier must have 20 outputs")
+        effective_threads = self._thread_configurer(
+            intra_op_threads, inter_op_threads
+        )
+        if effective_threads != (intra_op_threads, inter_op_threads):
+            raise DataValidationError(
+                "effective PyTorch CPU thread counts do not match config"
+            )
+        cpu_device = torch.device("cpu")
+        detector = self._detector_factory(detector_checkpoint)
+        names = detector.names
+        if not isinstance(names, Mapping) or tuple(
+            names[index] for index in sorted(names)
+        ) != ("bread",):
+            raise DataValidationError("CPU benchmark detector must have one bread class")
+        classifier = self._classifier_loader(
+            checkpoint=classifier_checkpoint,
+            output_dimension=output_dimension,
+            checkpoint_context=classifier_context,
+            image_size=classifier_image_size,
+            device=cpu_device,
+        )
+        if hasattr(classifier, "to"):
+            classifier = classifier.to(cpu_device)
+        if hasattr(classifier, "eval"):
+            classifier = classifier.eval()
+        self._require_cpu_module(classifier)
+        validation_transform = self._transform_factory(classifier_image_size)
+
+        measured_ids: list[str] = []
+        batch_sizes: list[int] = []
+        stage_samples: dict[str, list[float]] = {
+            stage: [] for stage in BENCHMARK_STAGES
+        }
+
+        def elapsed_ms(start: int, end: int) -> float:
+            value = (end - start) / 1_000_000.0
+            if value < 0.0:
+                raise DataValidationError("CPU benchmark clock moved backwards")
+            return value
+
+        def invoke(image_id: str, image_path: Path, *, measured: bool) -> None:
+            end_to_end_start = self._clock_ns()
+
+            detector_start = self._clock_ns()
+            detector_results = detector.predict(
+                source=str(image_path),
+                conf=detector_confidence,
+                iou=detector_nms_iou,
+                imgsz=detector_image_size,
+                device="cpu",
+                verbose=False,
+                stream=False,
+            )
+            detector_end = self._clock_ns()
+            if len(detector_results) != 1:
+                raise DataValidationError(
+                    "CPU detector must return exactly one result per scene"
+                )
+            result = detector_results[0]
+
+            crop_start = self._clock_ns()
+            try:
+                with Image.open(image_path) as source:
+                    scene = source.convert("RGB")
+            except (OSError, UnidentifiedImageError) as exc:
+                raise DataValidationError(
+                    f"cannot load CPU benchmark image {image_path}: {exc}"
+                ) from exc
+            width, height = scene.size
+            crop_tensors = []
+            detections: list[tuple[tuple[float, float, float, float], float]] = []
+            boxes = result.boxes
+            for xyxy, confidence, class_index in zip(
+                boxes.xyxy.detach().cpu().tolist(),
+                boxes.conf.detach().cpu().tolist(),
+                boxes.cls.detach().cpu().tolist(),
+                strict=True,
+            ):
+                if int(class_index) != 0:
+                    raise DataValidationError("CPU detector emitted a non-bread class")
+                x1 = max(0.0, min(float(width), float(xyxy[0])))
+                y1 = max(0.0, min(float(height), float(xyxy[1])))
+                x2 = max(0.0, min(float(width), float(xyxy[2])))
+                y2 = max(0.0, min(float(height), float(xyxy[3])))
+                if x2 <= x1 or y2 <= y1:
+                    continue
+                crop = scene.crop(
+                    (
+                        math.floor(x1),
+                        math.floor(y1),
+                        math.ceil(x2),
+                        math.ceil(y2),
+                    )
+                )
+                crop_tensors.append(validation_transform(crop))
+                detections.append(((x1, y1, x2, y2), float(confidence)))
+            batch = (
+                torch.stack(crop_tensors).to(cpu_device)
+                if crop_tensors
+                else None
+            )
+            if batch is not None and batch.device.type != "cpu":
+                raise DataValidationError("classifier input tensor must be on CPU")
+            crop_end = self._clock_ns()
+
+            classifier_ms = 0.0
+            model_indices = None
+            classifier_confidences = None
+            if batch is not None:
+                classifier_start = self._clock_ns()
+                with torch.inference_mode():
+                    probabilities = classifier(batch).softmax(dim=1)
+                    classifier_confidences, model_indices = probabilities.max(dim=1)
+                classifier_end = self._clock_ns()
+                if probabilities.device.type != "cpu":
+                    raise DataValidationError("classifier output tensor must be on CPU")
+                classifier_ms = elapsed_ms(classifier_start, classifier_end)
+
+            postprocess_start = self._clock_ns()
+            final_predictions = []
+            if model_indices is not None and classifier_confidences is not None:
+                for (bbox, detector_score), model_index, classifier_score in zip(
+                    detections,
+                    model_indices.detach().cpu().tolist(),
+                    classifier_confidences.detach().cpu().tolist(),
+                    strict=True,
+                ):
+                    final_predictions.append(
+                        {
+                            "bbox_xyxy": bbox,
+                            "model_index": int(model_index),
+                            "detector_confidence": detector_score,
+                            "classifier_confidence": float(classifier_score),
+                            "score": detector_score * float(classifier_score),
+                        }
+                    )
+            postprocess_end = self._clock_ns()
+            if len(final_predictions) != len(detections):
+                raise DataValidationError(
+                    "CPU benchmark postprocess count does not match detections"
+                )
+            end_to_end_end = self._clock_ns()
+
+            if measured:
+                measured_ids.append(image_id)
+                batch_sizes.append(len(crop_tensors))
+                stage_samples["detector"].append(
+                    elapsed_ms(detector_start, detector_end)
+                )
+                stage_samples["crop_preprocess"].append(
+                    elapsed_ms(crop_start, crop_end)
+                )
+                stage_samples["classifier_batch"].append(classifier_ms)
+                stage_samples["postprocess"].append(
+                    elapsed_ms(postprocess_start, postprocess_end)
+                )
+                stage_samples["end_to_end"].append(
+                    elapsed_ms(end_to_end_start, end_to_end_end)
+                )
+
+        for _iteration in range(warmup_iterations):
+            for image_id, image_path in zip(image_ids, image_paths, strict=True):
+                invoke(image_id, image_path, measured=False)
+        for _iteration in range(repetitions):
+            for image_id, image_path in zip(image_ids, image_paths, strict=True):
+                invoke(image_id, image_path, measured=True)
+
+        return CpuBackendResult(
+            stage_samples_ms={
+                stage: tuple(stage_samples[stage]) for stage in BENCHMARK_STAGES
+            },
+            measured_image_ids=tuple(measured_ids),
+            classifier_batch_sizes=tuple(batch_sizes),
+            warmup_invocation_count=warmup_iterations * len(image_ids),
+            runtime="pytorch",
+            execution_provider="CPU",
+            device="cpu",
+            intra_op_threads=effective_threads[0],
+            inter_op_threads=effective_threads[1],
+        )
