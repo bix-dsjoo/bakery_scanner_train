@@ -19,7 +19,7 @@ from .errors import DataValidationError
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="bakery-classifier",
-        description="Train and evaluate the train-side Base bread classifier.",
+        description="Train and evaluate train-side Base or Incremental classifiers.",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
     train = subparsers.add_parser("train", help="train the configured classifier")
