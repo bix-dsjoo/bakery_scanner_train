@@ -80,6 +80,7 @@
   mutation, missing/extra files, invalid manifest fields, test paths before
   decode, and mutation of annotation-free scene sources.
   Add one extra class image and assert count drift fails before publication.
+  Alter the recorded Pillow version and assert replay validation fails.
 
 - [ ] **Step 2: Run focused tests and verify RED**
 
@@ -94,7 +95,8 @@
   compare every source/output hash, record all scene hashes including empty
   normal scenes, enforce exact manifest keys and inventory, and verify
   split/count summaries from records. Treat staging rename as the commit point
-  and make post-commit backup cleanup best-effort.
+  and make post-commit backup cleanup best-effort. Record Python, platform, and
+  Pillow versions and require the runtime Pillow version for exact PNG replay.
 
 - [ ] **Step 4: Run focused and full tests**
 

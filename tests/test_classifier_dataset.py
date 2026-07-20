@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 
 import pytest
+import PIL
 from PIL import Image
 
 from bakery_scanner import classifier_dataset
@@ -60,6 +61,9 @@ def test_build_base_dataset_maps_model_indices_and_preserves_scene_groups(
     manifest = json.loads(report.manifest_path.read_text(encoding="utf-8"))
     assert report.output_dimension == 15
     assert manifest["registry"]["output_dimension"] == 15
+    assert manifest["environment"]["dependencies"]["Pillow"] == PIL.__version__
+    assert manifest["environment"]["python"]
+    assert manifest["environment"]["platform"]
     assert {sample["model_index"] for sample in manifest["samples"]} == set(range(15))
     assert set(manifest["counts"]["by_split_class"]) == {"train", "validation"}
     assert sum(manifest["counts"]["by_split_class"]["validation"].values()) == 3
@@ -351,3 +355,50 @@ def test_build_rejects_class_image_count_drift(dataset_factory) -> None:
         build_classifier_dataset(
             _config(dataset_root, "count-drift", "incremental")
         )
+
+
+def test_validation_rejects_pillow_version_drift(dataset_factory) -> None:
+    dataset_root = dataset_factory()
+    report = build_classifier_dataset(_config(dataset_root, "pillow-drift", "base"))
+    manifest = json.loads(report.manifest_path.read_text(encoding="utf-8"))
+    manifest["environment"]["dependencies"]["Pillow"] = "0.0.0"
+    report.manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(DataValidationError, match="Pillow version does not match"):
+        validate_classifier_dataset(dataset_root, "pillow-drift")
+
+
+def test_build_rejects_registry_link_to_test_before_reading_it(
+    dataset_factory,
+    monkeypatch,
+) -> None:
+    dataset_root = dataset_factory()
+    registry_path = dataset_root / "class_registry.json"
+    test_json = dataset_root / "base" / "test" / "instances_test.json"
+    original_read_text = Path.read_text
+    original_resolve = Path.resolve
+    registry_absolute = registry_path.absolute()
+    test_resolved = original_resolve(test_json)
+
+    def resolve_registry_link(path, *args, **kwargs):
+        if path.absolute() == registry_absolute:
+            return test_resolved
+        return original_resolve(path, *args, **kwargs)
+
+    def reject_test_registry_read(path, *args, **kwargs):
+        if path.absolute() == registry_absolute:
+            raise AssertionError("test JSON was read before registry safety validation")
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", resolve_registry_link)
+    monkeypatch.setattr(Path, "read_text", reject_test_registry_read)
+    with pytest.raises(DataValidationError, match="evaluation-only"):
+        build_classifier_dataset(
+            _config(dataset_root, "unsafe-registry", "base")
+        )
+
+
+def test_classifier_config_defaults_match_repository_counts() -> None:
+    config = ClassifierDatasetConfig(Path("datasets"), "defaults", "base")
+    assert config.expected_base_images_per_class == 84
+    assert config.expected_incremental_images_per_class == 7

@@ -60,6 +60,7 @@ errors rather than silent overwrites.
 `manifest.json` records:
 
 - manifest and builder versions;
+- Python, platform, and Pillow versions used to encode and replay crop files;
 - phase, seed, validation fraction, dataset root, and output run name;
 - registry path and SHA-256;
 - every source COCO, source image, and single-object file path and SHA-256;
@@ -103,7 +104,8 @@ source COCO and registry data, regenerates every scene crop, and compares crop
 bytes and dimensions. Missing, extra, altered, undecodable, or mislabeled files
 are errors. Validation also replays the configured split and rejects any
 manifest disagreement. Resolved scene paths are checked against evaluation-only
-roots before any scene image is decoded.
+roots before any scene image is decoded. The recorded Pillow version must match
+the validation runtime because exact PNG bytes are part of the replay contract.
 
 ## Interfaces
 

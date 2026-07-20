@@ -5,6 +5,7 @@ import io
 import json
 import math
 import os
+import platform
 import random
 import re
 import shutil
@@ -14,6 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
+import PIL
 from PIL import Image, UnidentifiedImageError
 
 from .coco import validate_coco
@@ -467,6 +469,14 @@ def _counts(samples: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _environment_metadata() -> dict[str, Any]:
+    return {
+        "python": platform.python_version(),
+        "platform": platform.platform(),
+        "dependencies": {"Pillow": PIL.__version__},
+    }
+
+
 def _manifest(
     *,
     config: ClassifierDatasetConfig,
@@ -480,6 +490,7 @@ def _manifest(
     return {
         "manifest_version": MANIFEST_VERSION,
         "builder_version": BUILDER_VERSION,
+        "environment": _environment_metadata(),
         "config": {
             "run_name": config.run_name,
             "phase": config.phase,
@@ -542,6 +553,7 @@ def _validate_run_dir(root: Path, run_name: str, run_dir: Path) -> ClassifierVal
         {
             "manifest_version",
             "builder_version",
+            "environment",
             "config",
             "registry",
             "scene_coco",
@@ -555,6 +567,19 @@ def _validate_run_dir(root: Path, run_name: str, run_dir: Path) -> ClassifierVal
         raise DataValidationError("unsupported classifier manifest version")
     if payload["builder_version"] != BUILDER_VERSION:
         raise DataValidationError("unsupported classifier builder version")
+    environment = _expect_keys(
+        payload["environment"],
+        {"python", "platform", "dependencies"},
+        "classifier environment",
+    )
+    for field in ("python", "platform"):
+        if not isinstance(environment[field], str) or not environment[field]:
+            raise DataValidationError(f"classifier environment {field} must be text")
+    dependencies = _expect_keys(
+        environment["dependencies"], {"Pillow"}, "classifier dependencies"
+    )
+    if dependencies["Pillow"] != PIL.__version__:
+        raise DataValidationError("manifest Pillow version does not match runtime")
     config_payload = _expect_keys(
         payload["config"],
         {

@@ -318,8 +318,9 @@ bakery-classifier-data validate `
 
 두 subcommand 모두 `--json`을 지원합니다. Manifest는 source/output hash,
 COCO bbox, `category_id`와 `model_index`, split, validation 도메인과 클래스별
-표본 수를 기록합니다. Test 경로, 변조된 원본·crop, 누락·추가 파일과
-레지스트리 매핑 불일치는 경고가 아니라 오류입니다.
+표본 수, Python·platform·Pillow 버전을 기록합니다. Test 경로, 변조된
+원본·crop, 누락·추가 파일, Pillow replay 버전과 레지스트리 매핑 불일치는
+경고가 아니라 오류입니다.
 
 ## 데이터 audit
 
