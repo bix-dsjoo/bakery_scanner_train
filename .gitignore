@@ -17,4 +17,5 @@ datasets/derived/classifier/
 models/pretrained/
 runs/detector/
 runs/classifier/
+runs/e2e/
 *.pt

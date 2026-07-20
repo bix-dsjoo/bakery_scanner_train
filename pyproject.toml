@@ -26,6 +26,7 @@ bakery-detector-data = "bakery_scanner.detector_cli:main"
 bakery-detector = "bakery_scanner.detector_train_cli:main"
 bakery-classifier-data = "bakery_scanner.classifier_data_cli:main"
 bakery-classifier = "bakery_scanner.classifier_train_cli:main"
+bakery-e2e = "bakery_scanner.e2e_cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
