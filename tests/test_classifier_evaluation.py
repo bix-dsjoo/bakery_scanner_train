@@ -55,6 +55,26 @@ def test_absent_class_with_false_positive_has_zero_precision() -> None:
     assert metrics["per_class"]["1"]["f1"] is None
 
 
+def test_incremental_metrics_separate_base_and_new_class_performance() -> None:
+    predictions = [
+        ClassifierPrediction("base-correct", 0, 0, 0.9),
+        ClassifierPrediction("base-wrong", 1, 0, 0.8),
+        ClassifierPrediction("new-correct", 15, 15, 0.95),
+        ClassifierPrediction("new-wrong", 16, 15, 0.7),
+    ]
+
+    metrics = evaluate_classifier_predictions(predictions, output_dimension=20)
+
+    assert metrics["phase"]["base"]["sample_count"] == 2
+    assert metrics["phase"]["base"]["top1_accuracy"] == 0.5
+    assert math.isclose(metrics["phase"]["base"]["macro_f1"], 1 / 3)
+    assert metrics["phase"]["incremental"]["sample_count"] == 2
+    assert metrics["phase"]["incremental"]["top1_accuracy"] == 0.5
+    assert math.isclose(
+        metrics["phase"]["incremental"]["macro_f1"], 1 / 3
+    )
+
+
 @pytest.mark.parametrize(
     "predictions,dimension,message",
     [

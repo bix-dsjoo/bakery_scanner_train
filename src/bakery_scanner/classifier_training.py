@@ -49,6 +49,26 @@ _CONFIG_FIELD_ORDER = (
     "weight_decay",
 )
 _CONFIG_FIELDS = set(_CONFIG_FIELD_ORDER)
+_INCREMENTAL_CONFIG_FIELD_ORDER = (
+    "phase",
+    "dataset_root",
+    "source_classifier_run",
+    "output_root",
+    "run_name",
+    "architecture",
+    "base_checkpoint",
+    "frozen_detector_checkpoint",
+    "image_size",
+    "epochs",
+    "batch_size",
+    "seed",
+    "device",
+    "patience",
+    "workers",
+    "learning_rate",
+    "weight_decay",
+)
+_INCREMENTAL_CONFIG_FIELDS = set(_INCREMENTAL_CONFIG_FIELD_ORDER)
 _PREPROCESSING_METADATA = {
     "train": [
         "RandomResizedCrop(scale=[0.8,1.0])",
@@ -76,6 +96,27 @@ class ClassifierTrainingConfig:
     run_name: str
     architecture: str
     pretrained_model: str
+    image_size: int
+    epochs: int
+    batch_size: int
+    seed: int
+    device: str
+    patience: int
+    workers: int
+    learning_rate: float
+    weight_decay: float
+
+
+@dataclass(frozen=True, slots=True)
+class IncrementalClassifierTrainingConfig:
+    phase: str
+    dataset_root: str
+    source_classifier_run: str
+    output_root: str
+    run_name: str
+    architecture: str
+    base_checkpoint: str
+    frozen_detector_checkpoint: str
     image_size: int
     epochs: int
     batch_size: int
@@ -261,6 +302,59 @@ def load_classifier_training_config(path: str | Path) -> ClassifierTrainingConfi
     )
 
 
+def load_classifier_experiment_config(
+    path: str | Path,
+) -> ClassifierTrainingConfig | IncrementalClassifierTrainingConfig:
+    config_path = Path(path)
+    try:
+        payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, yaml.YAMLError) as exc:
+        raise DataValidationError(
+            f"cannot load classifier config {config_path}: {exc}"
+        ) from exc
+    if not isinstance(payload, dict) or "phase" not in payload:
+        return load_classifier_training_config(config_path)
+    payload = _strict_object(
+        payload,
+        _INCREMENTAL_CONFIG_FIELDS,
+        "incremental classifier config",
+    )
+    if payload["phase"] != "incremental":
+        raise DataValidationError("incremental classifier phase must be incremental")
+    architecture = _text(payload["architecture"], "architecture")
+    if architecture != "resnet18":
+        raise DataValidationError("architecture must be resnet18 for this baseline")
+    device = _text(payload["device"], "device")
+    if device != "0":
+        raise DataValidationError("device must be CUDA device '0' for this baseline")
+    return IncrementalClassifierTrainingConfig(
+        phase="incremental",
+        dataset_root=_text(payload["dataset_root"], "dataset_root"),
+        source_classifier_run=_run_name(
+            payload["source_classifier_run"], "source_classifier_run"
+        ),
+        output_root=_text(payload["output_root"], "output_root"),
+        run_name=_run_name(payload["run_name"], "run_name"),
+        architecture=architecture,
+        base_checkpoint=_text(payload["base_checkpoint"], "base_checkpoint"),
+        frozen_detector_checkpoint=_text(
+            payload["frozen_detector_checkpoint"],
+            "frozen_detector_checkpoint",
+        ),
+        image_size=_integer(payload["image_size"], "image_size"),
+        epochs=_integer(payload["epochs"], "epochs"),
+        batch_size=_integer(payload["batch_size"], "batch_size"),
+        seed=_integer(payload["seed"], "seed", allow_zero=True),
+        device=device,
+        patience=_integer(payload["patience"], "patience", allow_zero=True),
+        workers=_integer(payload["workers"], "workers", allow_zero=True),
+        learning_rate=_number(payload["learning_rate"], "learning_rate"),
+        weight_decay=_number(
+            payload["weight_decay"], "weight_decay", allow_zero=True
+        ),
+    )
+
+
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -279,8 +373,67 @@ def _json_object(path: Path, label: str) -> dict[str, Any]:
     return payload
 
 
-def _config_payload(config: ClassifierTrainingConfig) -> dict[str, Any]:
-    return {field: getattr(config, field) for field in _CONFIG_FIELD_ORDER}
+def _config_payload(
+    config: ClassifierTrainingConfig | IncrementalClassifierTrainingConfig,
+) -> dict[str, Any]:
+    fields = (
+        _INCREMENTAL_CONFIG_FIELD_ORDER
+        if isinstance(config, IncrementalClassifierTrainingConfig)
+        else _CONFIG_FIELD_ORDER
+    )
+    return {field: getattr(config, field) for field in fields}
+
+
+def _backend_config_payload(
+    config: ClassifierTrainingConfig | IncrementalClassifierTrainingConfig,
+) -> dict[str, Any]:
+    payload = _config_payload(config)
+    payload.pop("frozen_detector_checkpoint", None)
+    return payload
+
+
+def _checkpoint_metadata(
+    checkpoint: Path, label: str
+) -> tuple[Path, dict[str, Any]]:
+    metadata_path = checkpoint.parent.parent / "metadata.json"
+    payload = _json_object(metadata_path, f"{label} metadata")
+    model = payload.get("model")
+    if not isinstance(model, dict):
+        raise DataValidationError(f"{label} metadata model must be an object")
+    expected_hash = model.get("best_sha256")
+    if not isinstance(expected_hash, str) or expected_hash != _sha256(checkpoint):
+        raise DataValidationError(f"{label} checkpoint SHA-256 does not match metadata")
+    return metadata_path, payload
+
+
+def _validate_incremental_source_artifacts(
+    base_checkpoint: Path,
+    detector_checkpoint: Path,
+) -> tuple[Path, Path]:
+    base_metadata_path, base_metadata = _checkpoint_metadata(
+        base_checkpoint, "Base classifier"
+    )
+    base_dataset = base_metadata.get("dataset")
+    base_model = base_metadata.get("model")
+    if (
+        not isinstance(base_dataset, dict)
+        or base_dataset.get("output_dimension") != 15
+        or not isinstance(base_model, dict)
+        or base_model.get("architecture") != "resnet18"
+    ):
+        raise DataValidationError(
+            "Base classifier metadata must describe a 15-output ResNet18"
+        )
+    detector_metadata_path, detector_metadata = _checkpoint_metadata(
+        detector_checkpoint, "detector"
+    )
+    detector_model = detector_metadata.get("model")
+    if (
+        not isinstance(detector_model, dict)
+        or detector_model.get("class_names") != ["bread"]
+    ):
+        raise DataValidationError("frozen detector metadata must declare one bread class")
+    return base_metadata_path, detector_metadata_path
 
 
 def _environment_metadata() -> dict[str, Any]:
@@ -353,7 +506,9 @@ def _load_samples(dataset_root: Path, manifest_path: Path) -> tuple[ClassifierSa
     return tuple(samples)
 
 
-def _backend_arguments(config: ClassifierTrainingConfig) -> dict[str, object]:
+def _backend_arguments(
+    config: ClassifierTrainingConfig | IncrementalClassifierTrainingConfig,
+) -> dict[str, object]:
     return {
         "architecture": config.architecture,
         "image_size": config.image_size,
@@ -369,7 +524,7 @@ def _backend_arguments(config: ClassifierTrainingConfig) -> dict[str, object]:
 
 
 def _checkpoint_context(
-    config: ClassifierTrainingConfig,
+    config: ClassifierTrainingConfig | IncrementalClassifierTrainingConfig,
     dataset_root: Path,
     manifest_path: Path,
     output_dimension: int,
@@ -401,7 +556,7 @@ def _checkpoint_context(
         "source_manifest_sha256": _sha256(manifest_path),
         "registry_sha256": registry_sha256,
         "model_index_mapping": mapping,
-        "config": _config_payload(config),
+        "config": _backend_config_payload(config),
     }
 
 
@@ -495,11 +650,14 @@ def _validate_completed_run(output_dir: Path) -> None:
 
 
 def train_classifier(
-    config: ClassifierTrainingConfig,
+    config: ClassifierTrainingConfig | IncrementalClassifierTrainingConfig,
     backend: ClassifierBackend | None = None,
 ) -> ClassifierTrainingReport:
-    if not isinstance(config, ClassifierTrainingConfig):
-        raise DataValidationError("config must be ClassifierTrainingConfig")
+    if not isinstance(
+        config, (ClassifierTrainingConfig, IncrementalClassifierTrainingConfig)
+    ):
+        raise DataValidationError("config must be a classifier training config")
+    is_incremental = isinstance(config, IncrementalClassifierTrainingConfig)
     selected_backend = backend or TorchvisionClassifierBackend()
     dataset_root = Path(config.dataset_root).resolve(strict=False)
     source_dir = (
@@ -507,17 +665,44 @@ def train_classifier(
     )
     registry_path = dataset_root / "class_registry.json"
     output_root = Path(config.output_root).resolve(strict=False)
-    pretrained_model = Path(config.pretrained_model).resolve(strict=False)
-    assert_training_paths_safe(
-        [source_dir, registry_path, output_root, pretrained_model], dataset_root
-    )
+    pretrained_model = Path(
+        config.base_checkpoint if is_incremental else config.pretrained_model
+    ).resolve(strict=False)
+    safety_paths = [source_dir, registry_path, output_root, pretrained_model]
+    detector_checkpoint: Path | None = None
+    detector_hash_before: str | None = None
+    if is_incremental:
+        detector_checkpoint = Path(
+            config.frozen_detector_checkpoint
+        ).resolve(strict=False)
+        safety_paths.extend(
+            [
+                pretrained_model.parent.parent / "metadata.json",
+                detector_checkpoint,
+                detector_checkpoint.parent.parent / "metadata.json",
+            ]
+        )
+    assert_training_paths_safe(safety_paths, dataset_root)
+
+    if is_incremental:
+        assert detector_checkpoint is not None
+        _validate_incremental_source_artifacts(
+            pretrained_model, detector_checkpoint
+        )
+        detector_hash_before = _sha256(detector_checkpoint)
 
     dataset_report = validate_classifier_dataset(
         dataset_root, config.source_classifier_run
     )
-    if dataset_report.phase != "base" or dataset_report.output_dimension != 15:
+    expected_phase = "incremental" if is_incremental else "base"
+    expected_dimension = 20 if is_incremental else 15
+    if (
+        dataset_report.phase != expected_phase
+        or dataset_report.output_dimension != expected_dimension
+    ):
         raise DataValidationError(
-            "Base classifier training requires a Base dataset with 15 outputs"
+            f"{expected_phase.title()} classifier training requires a "
+            f"{expected_phase.title()} dataset with {expected_dimension} outputs"
         )
     if not pretrained_model.is_file():
         raise DataValidationError(
@@ -539,6 +724,11 @@ def train_classifier(
     )
     if not train_samples or not validation_samples:
         raise DataValidationError("classifier train and validation splits must be non-empty")
+    if is_incremental:
+        _validate_incremental_validation_support(validation_samples)
+    class_counts, class_weights = _balanced_class_statistics(
+        train_samples, dataset_report.output_dimension
+    )
 
     output_dir = output_root / config.run_name
     if output_dir.exists():
@@ -547,7 +737,11 @@ def train_classifier(
     staging_dir = output_root / f".{config.run_name}.tmp-{uuid.uuid4().hex}"
     staging_dir.mkdir()
     try:
-        arguments = _backend_arguments(config)
+        arguments = {
+            **_backend_arguments(config),
+            "class_counts": class_counts,
+            "class_weights": class_weights,
+        }
         backend_result = selected_backend.train(
             pretrained_model=pretrained_model,
             train_samples=train_samples,
@@ -579,6 +773,13 @@ def train_classifier(
             arguments=arguments,
             output_dir=staging_dir,
         )
+        detector_hash_after: str | None = None
+        if detector_checkpoint is not None:
+            detector_hash_after = _sha256(detector_checkpoint)
+            if detector_hash_after != detector_hash_before:
+                raise DataValidationError(
+                    "frozen detector checkpoint changed during classifier training"
+                )
         history_path = staging_dir / "history.json"
         history_path.write_text(
             json.dumps(
@@ -600,10 +801,26 @@ def train_classifier(
             yaml.safe_dump(_config_payload(config), allow_unicode=True, sort_keys=False),
             encoding="utf-8",
         )
-        metadata_path = staging_dir / "metadata.json"
-        metadata_path.write_text(
-            json.dumps(
+        model_metadata = {
+            "architecture": config.architecture,
+            "best_sha256": _sha256(best_checkpoint),
+            "last_sha256": _sha256(last_checkpoint),
+        }
+        if is_incremental:
+            model_metadata.update(
                 {
+                    "base_checkpoint": str(pretrained_model),
+                    "base_checkpoint_sha256": _sha256(pretrained_model),
+                }
+            )
+        else:
+            model_metadata.update(
+                {
+                    "pretrained_path": str(pretrained_model),
+                    "pretrained_sha256": _sha256(pretrained_model),
+                }
+            )
+        metadata_payload = {
                     "metadata_version": 1,
                     "created_at": datetime.now(timezone.utc).isoformat(),
                     "split": "validation",
@@ -620,17 +837,18 @@ def train_classifier(
                         "train_samples": len(train_samples),
                         "validation_samples": len(validation_samples),
                     },
-                    "model": {
-                        "architecture": config.architecture,
-                        "pretrained_path": str(pretrained_model),
-                        "pretrained_sha256": _sha256(pretrained_model),
-                        "best_sha256": _sha256(best_checkpoint),
-                        "last_sha256": _sha256(last_checkpoint),
-                    },
+                    "model": model_metadata,
                     "training": {
                         "best_epoch": backend_result.best_epoch,
                         "epochs_completed": backend_result.epochs_completed,
                         "selection_metric": "validation_loss",
+                    },
+                    "class_balance": {
+                        "formula": (
+                            "train_samples / (output_dimension * class_count)"
+                        ),
+                        "class_counts": list(class_counts),
+                        "class_weights": list(class_weights),
                     },
                     "environment": _environment_metadata(),
                     "determinism": {
@@ -643,7 +861,27 @@ def train_classifier(
                     },
                     "preprocessing": _PREPROCESSING_METADATA,
                     "backend_arguments": arguments,
-                },
+                }
+        if is_incremental:
+            assert detector_checkpoint is not None
+            assert detector_hash_before is not None
+            assert detector_hash_after is not None
+            metadata_payload["initialization"] = {
+                "source_output_dimension": 15,
+                "target_output_dimension": 20,
+                "copied_base_rows": 15,
+                "new_rows": 5,
+            }
+            metadata_payload["frozen_detector"] = {
+                "checkpoint": str(detector_checkpoint),
+                "sha256_before": detector_hash_before,
+                "sha256_after": detector_hash_after,
+                "detector_unchanged": True,
+            }
+        metadata_path = staging_dir / "metadata.json"
+        metadata_path.write_text(
+            json.dumps(
+                metadata_payload,
                 ensure_ascii=False,
                 indent=2,
                 sort_keys=True,
@@ -669,13 +907,16 @@ def train_classifier(
 
 
 def evaluate_classifier_checkpoint(
-    config: ClassifierTrainingConfig,
+    config: ClassifierTrainingConfig | IncrementalClassifierTrainingConfig,
     checkpoint: str | Path,
     backend: ClassifierBackend | None = None,
     output_dir: str | Path | None = None,
 ) -> ClassifierEvaluationReport:
-    if not isinstance(config, ClassifierTrainingConfig):
-        raise DataValidationError("config must be ClassifierTrainingConfig")
+    if not isinstance(
+        config, (ClassifierTrainingConfig, IncrementalClassifierTrainingConfig)
+    ):
+        raise DataValidationError("config must be a classifier training config")
+    is_incremental = isinstance(config, IncrementalClassifierTrainingConfig)
     selected_backend = backend or TorchvisionClassifierBackend()
     dataset_root = Path(config.dataset_root).resolve(strict=False)
     source_dir = (
@@ -688,15 +929,41 @@ def evaluate_classifier_checkpoint(
         if output_dir is not None
         else checkpoint_path.parent.parent / "evaluation"
     )
-    assert_training_paths_safe(
-        [source_dir, registry_path, checkpoint_path, target_dir], dataset_root
-    )
+    safety_paths = [source_dir, registry_path, checkpoint_path, target_dir]
+    detector_checkpoint: Path | None = None
+    detector_hash_before: str | None = None
+    if is_incremental:
+        base_checkpoint = Path(config.base_checkpoint).resolve(strict=False)
+        detector_checkpoint = Path(
+            config.frozen_detector_checkpoint
+        ).resolve(strict=False)
+        safety_paths.extend(
+            [
+                base_checkpoint,
+                base_checkpoint.parent.parent / "metadata.json",
+                detector_checkpoint,
+                detector_checkpoint.parent.parent / "metadata.json",
+            ]
+        )
+    assert_training_paths_safe(safety_paths, dataset_root)
+    if is_incremental:
+        assert detector_checkpoint is not None
+        _validate_incremental_source_artifacts(
+            base_checkpoint, detector_checkpoint
+        )
+        detector_hash_before = _sha256(detector_checkpoint)
     dataset_report = validate_classifier_dataset(
         dataset_root, config.source_classifier_run
     )
-    if dataset_report.phase != "base" or dataset_report.output_dimension != 15:
+    expected_phase = "incremental" if is_incremental else "base"
+    expected_dimension = 20 if is_incremental else 15
+    if (
+        dataset_report.phase != expected_phase
+        or dataset_report.output_dimension != expected_dimension
+    ):
         raise DataValidationError(
-            "Base classifier evaluation requires a Base dataset with 15 outputs"
+            f"{expected_phase.title()} classifier evaluation requires a "
+            f"{expected_phase.title()} dataset with {expected_dimension} outputs"
         )
     if not checkpoint_path.is_file():
         raise DataValidationError(
@@ -716,6 +983,8 @@ def evaluate_classifier_checkpoint(
     )
     if not validation_samples:
         raise DataValidationError("classifier validation split must be non-empty")
+    if is_incremental:
+        _validate_incremental_validation_support(validation_samples)
     if target_dir.exists():
         raise DataValidationError(
             f"classifier evaluation output already exists: {target_dir}"
@@ -731,6 +1000,12 @@ def evaluate_classifier_checkpoint(
             arguments=_backend_arguments(config),
             output_dir=target_dir,
         )
+        if detector_checkpoint is not None:
+            detector_hash_after = _sha256(detector_checkpoint)
+            if detector_hash_after != detector_hash_before:
+                raise DataValidationError(
+                    "frozen detector checkpoint changed during classifier evaluation"
+                )
         return ClassifierEvaluationReport(
             output_dir=target_dir,
             checkpoint=checkpoint_path,
@@ -768,6 +1043,135 @@ def _build_resnet18(pretrained_model: Path, output_dimension: int):
         ) from exc
     model.fc = nn.Linear(model.fc.in_features, output_dimension)
     return model
+
+
+def _build_incremental_resnet18(
+    base_checkpoint: Path,
+    *,
+    output_dimension: int,
+    checkpoint_context: Mapping[str, Any],
+    image_size: int,
+):
+    import torch
+    from torch import nn
+    from torchvision.models import resnet18
+
+    if output_dimension != 20:
+        raise DataValidationError("Incremental classifier requires 20 outputs")
+    try:
+        payload = torch.load(base_checkpoint, map_location="cpu", weights_only=True)
+    except (
+        OSError,
+        RuntimeError,
+        TypeError,
+        ValueError,
+        EOFError,
+        pickle.UnpicklingError,
+    ) as exc:
+        raise DataValidationError(
+            f"cannot load Base classifier checkpoint {base_checkpoint}: {exc}"
+        ) from exc
+    required = {
+        "checkpoint_version",
+        "architecture",
+        "output_dimension",
+        "image_size",
+        "epoch",
+        "validation_loss",
+        "model_state_dict",
+        "optimizer_state_dict",
+        "context",
+    }
+    if not isinstance(payload, dict) or set(payload) != required:
+        raise DataValidationError("Base classifier checkpoint schema is invalid")
+    if (
+        payload["checkpoint_version"] != 1
+        or payload["architecture"] != "resnet18"
+        or payload["output_dimension"] != 15
+    ):
+        raise DataValidationError(
+            "Incremental initialization requires a 15-output Base checkpoint"
+        )
+    if payload["image_size"] != image_size:
+        raise DataValidationError("Base checkpoint image size does not match")
+    base_context = payload.get("context")
+    if not isinstance(base_context, dict):
+        raise DataValidationError("Base checkpoint context is invalid")
+    if base_context.get("registry_sha256") != checkpoint_context.get(
+        "registry_sha256"
+    ):
+        raise DataValidationError("Base checkpoint registry does not match")
+    base_mapping = base_context.get("model_index_mapping")
+    incremental_mapping = checkpoint_context.get("model_index_mapping")
+    if (
+        not isinstance(base_mapping, list)
+        or not isinstance(incremental_mapping, list)
+        or len(base_mapping) != 15
+        or len(incremental_mapping) != 20
+        or base_mapping != incremental_mapping[:15]
+    ):
+        raise DataValidationError("Base checkpoint model_index mapping does not match")
+
+    base_model = resnet18(weights=None)
+    base_model.fc = nn.Linear(base_model.fc.in_features, 15)
+    try:
+        base_model.load_state_dict(payload["model_state_dict"], strict=True)
+    except (RuntimeError, TypeError) as exc:
+        raise DataValidationError(
+            f"cannot strict-load Base classifier checkpoint: {exc}"
+        ) from exc
+    expanded = resnet18(weights=None)
+    expanded.fc = nn.Linear(expanded.fc.in_features, 20)
+    with torch.no_grad():
+        expanded_state = expanded.state_dict()
+        for key, tensor in base_model.state_dict().items():
+            if not key.startswith("fc."):
+                expanded_state[key].copy_(tensor)
+        expanded.load_state_dict(expanded_state, strict=True)
+        expanded.fc.weight[:15].copy_(base_model.fc.weight)
+        expanded.fc.bias[:15].copy_(base_model.fc.bias)
+    return expanded, {
+        "source_output_dimension": 15,
+        "target_output_dimension": 20,
+        "copied_base_rows": 15,
+        "new_rows": 5,
+    }
+
+
+def _balanced_class_statistics(
+    train_samples: Sequence[ClassifierSample], output_dimension: int
+) -> tuple[tuple[int, ...], tuple[float, ...]]:
+    if (
+        isinstance(output_dimension, bool)
+        or not isinstance(output_dimension, int)
+        or output_dimension <= 0
+    ):
+        raise DataValidationError("output_dimension must be a positive integer")
+    counts = [0] * output_dimension
+    for sample in train_samples:
+        if not isinstance(sample, ClassifierSample):
+            raise DataValidationError("train samples must be ClassifierSample values")
+        if not 0 <= sample.target_index < output_dimension:
+            raise DataValidationError(
+                f"classifier target is outside output dimension: {sample.target_index}"
+            )
+        counts[sample.target_index] += 1
+    if any(count == 0 for count in counts):
+        raise DataValidationError("classifier train split must support every output")
+    total = len(train_samples)
+    weights = tuple(total / (output_dimension * count) for count in counts)
+    return tuple(counts), weights
+
+
+def _validate_incremental_validation_support(
+    validation_samples: Sequence[ClassifierSample],
+) -> None:
+    supported = {sample.target_index for sample in validation_samples}
+    missing = sorted(set(range(15, 20)) - supported)
+    if missing:
+        raise DataValidationError(
+            f"Incremental validation is missing new class model_index values: {missing}"
+        )
 
 
 class _ManifestImageDataset:
@@ -993,18 +1397,32 @@ class TorchvisionClassifierBackend:
         if not len(train_loader) or not len(validation_loader):
             raise DataValidationError("classifier backend received an empty split")
 
-        model = _build_resnet18(pretrained_model, output_dimension).to(device)
-        counts = torch.zeros(output_dimension, dtype=torch.float32)
-        for sample in train_samples:
-            if not 0 <= sample.target_index < output_dimension:
-                raise DataValidationError(
-                    f"classifier target is outside output dimension: {sample.target_index}"
-                )
-            counts[sample.target_index] += 1
-        weights = torch.zeros_like(counts)
-        present = counts > 0
-        weights[present] = len(train_samples) / (output_dimension * counts[present])
-        criterion = nn.CrossEntropyLoss(weight=weights.to(device))
+        if output_dimension == 20:
+            model, _initialization = _build_incremental_resnet18(
+                pretrained_model,
+                output_dimension=output_dimension,
+                checkpoint_context=checkpoint_context,
+                image_size=image_size,
+            )
+        else:
+            model = _build_resnet18(pretrained_model, output_dimension)
+        model = model.to(device)
+        _counts, class_weights = _balanced_class_statistics(
+            train_samples, output_dimension
+        )
+        if tuple(arguments.get("class_counts", _counts)) != _counts:
+            raise DataValidationError("classifier class counts do not match samples")
+        recorded_weights = tuple(arguments.get("class_weights", class_weights))
+        if len(recorded_weights) != len(class_weights) or any(
+            not math.isclose(float(actual), expected, rel_tol=0.0, abs_tol=1e-12)
+            for actual, expected in zip(
+                recorded_weights, class_weights, strict=True
+            )
+        ):
+            raise DataValidationError("classifier class weights do not match samples")
+        criterion = nn.CrossEntropyLoss(
+            weight=torch.tensor(recorded_weights, dtype=torch.float32, device=device)
+        )
         optimizer = torch.optim.AdamW(
             model.parameters(), lr=learning_rate, weight_decay=weight_decay
         )

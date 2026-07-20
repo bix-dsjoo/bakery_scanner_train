@@ -10,7 +10,7 @@ from .classifier_training import (
     ClassifierEvaluationReport,
     ClassifierTrainingReport,
     evaluate_classifier_checkpoint,
-    load_classifier_training_config,
+    load_classifier_experiment_config,
     train_classifier,
 )
 from .errors import DataValidationError
@@ -19,7 +19,7 @@ from .errors import DataValidationError
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="bakery-classifier",
-        description="Train and evaluate the train-side Base bread classifier.",
+        description="Train and evaluate train-side Base or Incremental classifiers.",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
     train = subparsers.add_parser("train", help="train the configured classifier")
@@ -60,7 +60,7 @@ def _print_preflight(args, config) -> None:
     source_run = (
         dataset_root / "derived" / "classifier" / config.source_classifier_run
     )
-    pretrained = Path(config.pretrained_model).resolve(strict=False)
+    phase = getattr(config, "phase", "base")
     if args.command == "train":
         output = (
             Path(config.output_root).resolve(strict=False) / config.run_name
@@ -74,17 +74,34 @@ def _print_preflight(args, config) -> None:
         )
         print(f"Classifier checkpoint: {checkpoint}", file=sys.stderr)
     print(f"Classifier dataset root: {dataset_root}", file=sys.stderr)
+    print(f"Classifier phase: {phase}", file=sys.stderr)
     print(f"Classifier source run: {source_run}", file=sys.stderr)
     print("Classifier train split: train", file=sys.stderr)
     print("Classifier validation split: validation (train-side)", file=sys.stderr)
-    print(f"Classifier pretrained model: {pretrained}", file=sys.stderr)
+    if phase == "incremental":
+        print(
+            "Classifier Base checkpoint: "
+            f"{Path(config.base_checkpoint).resolve(strict=False)}",
+            file=sys.stderr,
+        )
+        print(
+            "Classifier frozen detector checkpoint: "
+            f"{Path(config.frozen_detector_checkpoint).resolve(strict=False)}",
+            file=sys.stderr,
+        )
+    else:
+        print(
+            "Classifier pretrained model: "
+            f"{Path(config.pretrained_model).resolve(strict=False)}",
+            file=sys.stderr,
+        )
     print(f"Classifier output: {output}", file=sys.stderr)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
-        config = load_classifier_training_config(args.config)
+        config = load_classifier_experiment_config(args.config)
         _print_preflight(args, config)
         if args.command == "train":
             report = train_classifier(config)

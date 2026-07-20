@@ -104,13 +104,49 @@ def evaluate_classifier_predictions(
         }
 
     total_correct = sum(true_positive_count)
-    return {
+    metrics = {
         "sample_count": len(predictions),
         "evaluated_class_count": len(supported_f1),
         "top1_accuracy": total_correct / len(predictions),
         "macro_f1": sum(supported_f1) / len(supported_f1),
         "per_class": per_class,
     }
+    if output_dimension in {15, 20}:
+        groups = {"base": range(15)}
+        if output_dimension == 20:
+            groups["incremental"] = range(15, 20)
+        phase_metrics: dict[str, dict[str, int | float | None]] = {}
+        for name, indices in groups.items():
+            index_set = set(indices)
+            group_predictions = [
+                prediction
+                for prediction in predictions
+                if prediction.target_index in index_set
+            ]
+            f1_values = [
+                per_class[str(index)]["f1"]
+                for index in index_set
+                if per_class[str(index)]["f1"] is not None
+            ]
+            phase_metrics[name] = {
+                "sample_count": len(group_predictions),
+                "top1_accuracy": (
+                    sum(
+                        prediction.target_index == prediction.predicted_index
+                        for prediction in group_predictions
+                    )
+                    / len(group_predictions)
+                    if group_predictions
+                    else None
+                ),
+                "macro_f1": (
+                    sum(float(value) for value in f1_values) / len(f1_values)
+                    if f1_values
+                    else None
+                ),
+            }
+        metrics["phase"] = phase_metrics
+    return metrics
 
 
 def _validate_index(label: str, value: int, output_dimension: int) -> None:

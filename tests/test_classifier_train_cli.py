@@ -52,7 +52,7 @@ def test_train_cli_prints_validation_selection_and_json(
     report = _training_report(tmp_path)
     monkeypatch.setattr(
         classifier_train_cli,
-        "load_classifier_training_config",
+        "load_classifier_experiment_config",
         lambda path: _config(tmp_path),
     )
     monkeypatch.setattr(
@@ -108,7 +108,7 @@ def test_evaluate_cli_passes_checkpoint_and_output_dir(
     calls = []
     monkeypatch.setattr(
         classifier_train_cli,
-        "load_classifier_training_config",
+        "load_classifier_experiment_config",
         lambda path: _config(tmp_path),
     )
     monkeypatch.setattr(
@@ -142,7 +142,39 @@ def test_cli_returns_one_for_invalid_config(monkeypatch, capsys) -> None:
     def fail(path):
         raise DataValidationError("bad classifier config")
 
-    monkeypatch.setattr(classifier_train_cli, "load_classifier_training_config", fail)
+    monkeypatch.setattr(classifier_train_cli, "load_classifier_experiment_config", fail)
 
     assert classifier_train_cli.main(["train", "--config", "bad.yaml"]) == 1
     assert "bad classifier config" in capsys.readouterr().err
+
+
+def test_incremental_cli_prints_phase_and_source_artifacts(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    report = _training_report(tmp_path)
+    config = SimpleNamespace(
+        phase="incremental",
+        dataset_root=str(tmp_path / "datasets"),
+        source_classifier_run="incremental_seed42",
+        base_checkpoint=str(tmp_path / "runs" / "base" / "best.pt"),
+        frozen_detector_checkpoint=str(
+            tmp_path / "runs" / "detector" / "best.pt"
+        ),
+        output_root=str(tmp_path / "runs" / "classifier"),
+        run_name="incremental",
+    )
+    monkeypatch.setattr(
+        classifier_train_cli,
+        "load_classifier_experiment_config",
+        lambda path: config,
+    )
+    monkeypatch.setattr(
+        classifier_train_cli, "train_classifier", lambda selected: report
+    )
+
+    assert classifier_train_cli.main(["train", "--config", "config.yaml"]) == 0
+
+    error = capsys.readouterr().err
+    assert "Classifier phase: incremental" in error
+    assert str(Path(config.base_checkpoint).resolve()) in error
+    assert str(Path(config.frozen_detector_checkpoint).resolve()) in error
