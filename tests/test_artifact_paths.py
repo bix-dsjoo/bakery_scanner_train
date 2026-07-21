@@ -77,3 +77,17 @@ def test_artifact_path_rejects_actual_outside_project(tmp_path: Path) -> None:
         tmp_path / "outside" / "datasets" / "a.json",
         project_root=root,
     )
+
+
+def test_artifact_path_rejects_absolute_traversal_even_if_it_resolves_to_actual(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "bakery_scanner_train"
+    actual = root / "datasets" / "manifest.json"
+    recorded = root / "datasets" / "derived" / ".." / "manifest.json"
+
+    assert not recorded_artifact_path_matches(
+        recorded,
+        actual,
+        project_root=root,
+    )

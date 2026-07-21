@@ -38,11 +38,11 @@ def recorded_artifact_path_matches(
         or relative.parts[0].casefold() not in _ARTIFACT_ANCHORS
     ):
         return False
-    if Path(recorded_path).resolve(strict=False) == actual:
-        return True
     recorded_parts = _portable_parts(recorded_path)
     if recorded_parts is None:
         return False
+    if Path(recorded_path).resolve(strict=False) == actual:
+        return True
     root_positions = [
         index
         for index, part in enumerate(recorded_parts)
