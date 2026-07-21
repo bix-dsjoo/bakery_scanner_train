@@ -399,6 +399,7 @@ def _prepare_cpu_benchmark(config: CpuBenchmarkConfig) -> PreparedCpuBenchmark:
         yolo_report.manifest_path,
         detector_config.source_detector_run,
         detector_report.manifest_path,
+        project_root=dataset_root.parent,
     )
     classifier_report = validate_classifier_dataset(
         dataset_root, classifier_config.source_classifier_run
@@ -427,6 +428,7 @@ def _prepare_cpu_benchmark(config: CpuBenchmarkConfig) -> PreparedCpuBenchmark:
         detector_checkpoint,
         detector_metadata,
         yolo_report.manifest_path,
+        project_root=dataset_root.parent,
     )
     classifier_metadata_path, classifier_metadata = _checkpoint_metadata(
         classifier_checkpoint, "classifier"

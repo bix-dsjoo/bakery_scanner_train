@@ -570,6 +570,7 @@ def _prepare_non_test_inputs(
         yolo_report.manifest_path,
         detector_config.source_detector_run,
         detector_report.manifest_path,
+        project_root=dataset_root.parent,
     )
     detector_metadata_path, detector_metadata = _checkpoint_metadata(
         detector_checkpoint, "detector"
@@ -580,6 +581,7 @@ def _prepare_non_test_inputs(
         detector_checkpoint,
         detector_metadata,
         yolo_report.manifest_path,
+        project_root=dataset_root.parent,
     )
 
     classifier_config_paths = {}

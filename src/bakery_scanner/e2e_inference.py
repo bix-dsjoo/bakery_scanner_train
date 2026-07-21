@@ -14,6 +14,7 @@ from typing import Any, Protocol
 
 import yaml
 
+from .artifact_paths import recorded_artifact_path_matches
 from .classifier_dataset import validate_classifier_dataset
 from .classifier_training import (
     _checkpoint_context,
@@ -197,6 +198,8 @@ def _validate_detector_checkpoint_provenance(
     checkpoint: Path,
     metadata: Mapping[str, Any],
     yolo_manifest_path: Path,
+    *,
+    project_root: Path,
 ) -> None:
     if replace(run_config, model=selected_config.model) != selected_config:
         raise DataValidationError(
@@ -217,8 +220,10 @@ def _validate_detector_checkpoint_provenance(
         raise DataValidationError(
             "detector metadata dataset manifest does not match the selected YOLO run"
         )
-    if Path(manifest_path).resolve(strict=False) != yolo_manifest_path.resolve(
-        strict=False
+    if not recorded_artifact_path_matches(
+        manifest_path,
+        yolo_manifest_path,
+        project_root=project_root,
     ):
         raise DataValidationError(
             "detector metadata dataset manifest path does not match the validated YOLO run"
@@ -256,6 +261,8 @@ def _validate_yolo_source_binding(
     yolo_manifest_path: Path,
     expected_source_run: str,
     detector_manifest_path: Path,
+    *,
+    project_root: Path,
 ) -> None:
     manifest = _json_object(yolo_manifest_path, "YOLO manifest")
     source = manifest.get("source")
@@ -265,8 +272,11 @@ def _validate_yolo_source_binding(
     if (
         source.get("run_name") != expected_source_run
         or not isinstance(recorded_path, str)
-        or Path(recorded_path).resolve(strict=False)
-        != detector_manifest_path.resolve(strict=False)
+        or not recorded_artifact_path_matches(
+            recorded_path,
+            detector_manifest_path,
+            project_root=project_root,
+        )
         or source.get("manifest_sha256") != _sha256(detector_manifest_path)
     ):
         raise DataValidationError(
@@ -410,6 +420,7 @@ def evaluate_end_to_end(
         yolo_report.manifest_path,
         detector_config.source_detector_run,
         detector_report.manifest_path,
+        project_root=dataset_root.parent,
     )
     classifier_report = validate_classifier_dataset(
         dataset_root, classifier_config.source_classifier_run
@@ -436,6 +447,7 @@ def evaluate_end_to_end(
         detector_checkpoint,
         detector_metadata,
         yolo_report.manifest_path,
+        project_root=dataset_root.parent,
     )
     classifier_metadata_path, _classifier_metadata = _checkpoint_metadata(
         classifier_checkpoint, "classifier"

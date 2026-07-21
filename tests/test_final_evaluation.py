@@ -321,11 +321,11 @@ def test_actual_preflight_never_touches_test_paths(tmp_path: Path, monkeypatch) 
     )
     monkeypatch.setattr(
         "bakery_scanner.e2e_inference._validate_yolo_source_binding",
-        lambda *_args: None,
+        lambda *_args, **_kwargs: None,
     )
     monkeypatch.setattr(
         "bakery_scanner.e2e_inference._validate_detector_checkpoint_provenance",
-        lambda *_args: None,
+        lambda *_args, **_kwargs: None,
     )
     monkeypatch.setattr(
         "bakery_scanner.e2e_inference._checkpoint_metadata",
