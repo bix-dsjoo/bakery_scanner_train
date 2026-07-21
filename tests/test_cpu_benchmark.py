@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import replace
 from pathlib import Path
@@ -17,10 +18,119 @@ from bakery_scanner.cpu_benchmark import (
     _percentile,
     _timing_statistics,
     _validate_backend_result,
+    _validate_classifier_checkpoint_provenance,
     load_cpu_benchmark_config,
     run_cpu_benchmark,
 )
 from bakery_scanner.errors import DataValidationError
+
+
+def _sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _relocated_classifier_provenance_fixture(tmp_path: Path):
+    project_root = tmp_path / "bakery_scanner_train"
+    manifest = project_root / "datasets" / "derived" / "classifier" / "manifest.json"
+    checkpoint = (
+        project_root
+        / "runs"
+        / "classifier"
+        / "incremental"
+        / "checkpoints"
+        / "best.pt"
+    )
+    detector_checkpoint = (
+        project_root / "runs" / "detector" / "base" / "checkpoints" / "best.pt"
+    )
+    for path, content in (
+        (manifest, b"manifest"),
+        (checkpoint, b"classifier"),
+        (detector_checkpoint, b"detector"),
+    ):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+    old_root = project_root / ".worktrees" / "classifier-foundation"
+    context = {"registry_sha256": "a" * 64, "model_index_mapping": {"bread": 0}}
+    metadata = {
+        "dataset": {
+            "phase": "incremental",
+            "output_dimension": 20,
+            "manifest_path": str(old_root / manifest.relative_to(project_root)),
+            "manifest_sha256": _sha256(manifest),
+            **context,
+        },
+        "model": {"architecture": "resnet18"},
+        "frozen_detector": {
+            "checkpoint": str(
+                old_root / detector_checkpoint.relative_to(project_root)
+            ),
+            "sha256_before": _sha256(detector_checkpoint),
+            "sha256_after": _sha256(detector_checkpoint),
+            "detector_unchanged": True,
+        },
+    }
+    config = SimpleNamespace(
+        output_root=project_root / "runs" / "classifier",
+        run_name="incremental",
+    )
+    return (
+        project_root,
+        manifest,
+        checkpoint,
+        detector_checkpoint,
+        context,
+        metadata,
+        config,
+    )
+
+
+def test_classifier_provenance_accepts_relocated_hashed_paths(tmp_path: Path) -> None:
+    (
+        project_root,
+        manifest,
+        checkpoint,
+        detector_checkpoint,
+        context,
+        metadata,
+        config,
+    ) = _relocated_classifier_provenance_fixture(tmp_path)
+
+    _validate_classifier_checkpoint_provenance(
+        config=config,
+        checkpoint=checkpoint,
+        metadata=metadata,
+        classifier_manifest_path=manifest,
+        classifier_context=context,
+        detector_checkpoint=detector_checkpoint,
+        project_root=project_root,
+    )
+
+
+def test_classifier_provenance_rejects_relocated_manifest_hash_drift(
+    tmp_path: Path,
+) -> None:
+    (
+        project_root,
+        manifest,
+        checkpoint,
+        detector_checkpoint,
+        context,
+        metadata,
+        config,
+    ) = _relocated_classifier_provenance_fixture(tmp_path)
+    metadata["dataset"]["manifest_sha256"] = "0" * 64
+
+    with pytest.raises(DataValidationError, match="classifier metadata dataset"):
+        _validate_classifier_checkpoint_provenance(
+            config=config,
+            checkpoint=checkpoint,
+            metadata=metadata,
+            classifier_manifest_path=manifest,
+            classifier_context=context,
+            detector_checkpoint=detector_checkpoint,
+            project_root=project_root,
+        )
 
 
 def _payload() -> dict[str, object]:

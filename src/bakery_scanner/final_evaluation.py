@@ -17,6 +17,7 @@ from typing import Any
 
 import yaml
 
+from .artifact_paths import recorded_artifact_path_matches
 from .errors import DataValidationError
 
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -439,6 +440,7 @@ def _validate_classifier_metadata(
     context: Mapping[str, Any],
     detector_checkpoint: Path,
     detector_hash: str,
+    project_root: Path,
 ) -> None:
     expected_checkpoint = (
         Path(selected_config.output_root)
@@ -456,8 +458,11 @@ def _validate_classifier_metadata(
         not isinstance(dataset, dict)
         or dataset.get("phase") != report.phase
         or dataset.get("output_dimension") != frozen.output_dimension
-        or Path(str(dataset.get("manifest_path"))).resolve(strict=False)
-        != report.manifest_path.resolve(strict=False)
+        or not recorded_artifact_path_matches(
+            dataset.get("manifest_path"),
+            report.manifest_path,
+            project_root=project_root,
+        )
         or dataset.get("manifest_sha256") != _sha256(report.manifest_path)
         or dataset.get("registry_sha256") != context.get("registry_sha256")
         or dataset.get("model_index_mapping") != context.get("model_index_mapping")
@@ -471,8 +476,11 @@ def _validate_classifier_metadata(
         frozen_detector = metadata.get("frozen_detector")
         if (
             not isinstance(frozen_detector, dict)
-            or Path(str(frozen_detector.get("checkpoint"))).resolve(strict=False)
-            != detector_checkpoint
+            or not recorded_artifact_path_matches(
+                frozen_detector.get("checkpoint"),
+                detector_checkpoint,
+                project_root=project_root,
+            )
             or frozen_detector.get("sha256_before") != detector_hash
             or frozen_detector.get("sha256_after") != detector_hash
             or frozen_detector.get("detector_unchanged") is not True
@@ -627,6 +635,7 @@ def _prepare_non_test_inputs(
             context=context,
             detector_checkpoint=detector_checkpoint,
             detector_hash=config.detector.checkpoint_sha256,
+            project_root=dataset_root.parent,
         )
         _strict_validate_classifier_checkpoint(
             checkpoint=checkpoint,
