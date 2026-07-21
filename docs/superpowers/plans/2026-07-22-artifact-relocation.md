@@ -32,7 +32,7 @@
 - Consumes: recorded path string or `Path`, current artifact `Path`, explicit repository root `Path`.
 - Produces: `recorded_artifact_path_matches(recorded_path, actual_path, *, project_root: Path) -> bool`.
 
-- [ ] **Step 1: Write failing tests for exact and relocated identity**
+- [x] **Step 1: Write failing tests for exact and relocated identity**
 
 ```python
 from pathlib import Path
@@ -64,7 +64,7 @@ def test_linked_worktree_artifact_path_matches_root_copy(tmp_path: Path) -> None
     assert recorded_artifact_path_matches(recorded, actual, project_root=root)
 ```
 
-- [ ] **Step 2: Write parameterized rejection tests**
+- [x] **Step 2: Write parameterized rejection tests**
 
 ```python
 @pytest.mark.parametrize(
@@ -98,7 +98,7 @@ def test_artifact_path_rejects_actual_outside_project(tmp_path: Path) -> None:
     )
 ```
 
-- [ ] **Step 3: Run the new tests and verify RED**
+- [x] **Step 3: Run the new tests and verify RED**
 
 Run:
 
@@ -108,7 +108,7 @@ pytest -q tests/test_artifact_paths.py
 
 Expected: collection fails with `ModuleNotFoundError: bakery_scanner.artifact_paths`.
 
-- [ ] **Step 4: Implement the minimal pure helper**
+- [x] **Step 4: Implement the minimal pure helper**
 
 ```python
 from __future__ import annotations
@@ -170,7 +170,7 @@ def recorded_artifact_path_matches(
     )
 ```
 
-- [ ] **Step 5: Run helper tests and full tests**
+- [x] **Step 5: Run helper tests and full tests**
 
 Run:
 
@@ -181,7 +181,7 @@ pytest -q
 
 Expected: all helper tests pass and the existing 246-test baseline remains green.
 
-- [ ] **Step 6: Commit the helper**
+- [x] **Step 6: Commit the helper**
 
 ```powershell
 git add src/bakery_scanner/artifact_paths.py tests/test_artifact_paths.py
@@ -204,7 +204,7 @@ git commit -m "feat(artifact): worktree relocation 경로를 판정한다"
 - Consumes: Task 1 `recorded_artifact_path_matches()`.
 - Produces: relocated YOLO source and detector metadata paths pass only with unchanged manifest hash.
 
-- [ ] **Step 1: Add a failing relocated YOLO-manifest test**
+- [x] **Step 1: Add a failing relocated YOLO-manifest test**
 
 ```python
 def test_validate_yolo_dataset_accepts_same_hashed_relocated_source(
@@ -229,7 +229,7 @@ def test_validate_yolo_dataset_accepts_same_hashed_relocated_source(
     assert validated.output_dir == report.output_dir
 ```
 
-- [ ] **Step 2: Add failing e2e provenance relocation tests**
+- [x] **Step 2: Add failing e2e provenance relocation tests**
 
 Extend `_validate_detector_checkpoint_provenance()` and
 `_validate_yolo_source_binding()` tests so their recorded manifest path is
@@ -239,7 +239,7 @@ functions and assert no exception. Add a paired test that writes different
 manifest bytes and still expects `DataValidationError` containing `SHA-256` or
 `YOLO source`.
 
-- [ ] **Step 3: Run targeted tests and verify RED**
+- [x] **Step 3: Run targeted tests and verify RED**
 
 Run:
 
@@ -252,7 +252,7 @@ Expected: YOLO test fails with `YOLO source manifest path changed`; e2e tests
 fail because the validation functions do not accept `project_root` or reject
 the relocated paths.
 
-- [ ] **Step 4: Integrate the helper in `yolo_dataset.py`**
+- [x] **Step 4: Integrate the helper in `yolo_dataset.py`**
 
 Import `recorded_artifact_path_matches` and replace the direct path equality:
 
@@ -267,7 +267,7 @@ if not recorded_artifact_path_matches(
 
 Keep the following SHA-256 comparison unchanged.
 
-- [ ] **Step 5: Integrate the helper in `e2e_inference.py`**
+- [x] **Step 5: Integrate the helper in `e2e_inference.py`**
 
 Add explicit keyword-only `project_root: Path` parameters to
 `_validate_detector_checkpoint_provenance()` and `_validate_yolo_source_binding()`.
@@ -275,7 +275,7 @@ Use the helper for the stored YOLO-manifest and source-detector-manifest paths,
 then update all production and test call sites to pass `dataset_root.parent`.
 Do not change expected runtime checkpoint equality at lines 243-251.
 
-- [ ] **Step 6: Run targeted and full tests**
+- [x] **Step 6: Run targeted and full tests**
 
 Run:
 
@@ -286,7 +286,7 @@ pytest -q
 
 Expected: relocated and negative hash tests pass; the full suite is green.
 
-- [ ] **Step 7: Commit YOLO/detector integration**
+- [x] **Step 7: Commit YOLO/detector integration**
 
 ```powershell
 git add src/bakery_scanner/yolo_dataset.py src/bakery_scanner/e2e_inference.py tests/test_yolo_dataset.py tests/test_e2e_inference.py
@@ -309,7 +309,7 @@ git commit -m "fix(artifact): detector provenance relocation을 허용한다"
 - Consumes: Task 1 helper and current classifier manifest/checkpoint hashes.
 - Produces: copied classifier metadata remains valid at root without weakening context, output dimension or detector-freeze checks.
 
-- [ ] **Step 1: Add failing CPU benchmark provenance tests**
+- [x] **Step 1: Add failing CPU benchmark provenance tests**
 
 Create a project root fixture with the actual classifier manifest under
 `datasets/derived/classifier/incremental_seed42/manifest.json` and detector
@@ -319,14 +319,14 @@ and call `_validate_classifier_checkpoint_provenance(...,
 project_root=project_root)`. Assert success. In a separate test change the
 manifest bytes and assert `DataValidationError`.
 
-- [ ] **Step 2: Add failing final-evaluation classifier metadata tests**
+- [x] **Step 2: Add failing final-evaluation classifier metadata tests**
 
 Extend `_validate_classifier_metadata()` coverage with relocated
 `dataset.manifest_path` and relocated Incremental `frozen_detector.checkpoint`.
 Pass `project_root=tmp_path / "bakery_scanner_train"` and assert success only
 when the recorded manifest hash and detector before/after hashes are exact.
 
-- [ ] **Step 3: Run targeted tests and verify RED**
+- [x] **Step 3: Run targeted tests and verify RED**
 
 Run:
 
@@ -338,7 +338,7 @@ pytest -q tests/test_final_evaluation.py -k relocation
 Expected: tests fail because the validation functions do not accept
 `project_root` or still compare stored paths literally.
 
-- [ ] **Step 4: Integrate relocation in `cpu_benchmark.py`**
+- [x] **Step 4: Integrate relocation in `cpu_benchmark.py`**
 
 Add `project_root: Path` to `_validate_classifier_checkpoint_provenance()`.
 Replace `dataset.get("manifest_path") != str(classifier_manifest_path)` and the
@@ -347,14 +347,14 @@ frozen-detector direct `Path.resolve()` comparison with
 output dimension and detector hash checks unchanged. Pass
 `project_root=dataset_root.parent` from the benchmark preflight call site.
 
-- [ ] **Step 5: Integrate relocation in `final_evaluation.py`**
+- [x] **Step 5: Integrate relocation in `final_evaluation.py`**
 
 Add `project_root: Path` to `_validate_classifier_metadata()`. Use the helper
 for `dataset.manifest_path` and Incremental `frozen_detector.checkpoint`, retain
 all current hash/context checks, and pass `project_root=dataset_root.parent`
 for Base and Incremental calls in `_prepare_non_test_inputs()`.
 
-- [ ] **Step 6: Run targeted and full tests**
+- [x] **Step 6: Run targeted and full tests**
 
 Run:
 
@@ -366,7 +366,7 @@ python -m compileall -q src tests
 
 Expected: all tests and compileall pass without accessing either real test split.
 
-- [ ] **Step 7: Commit classifier provenance integration**
+- [x] **Step 7: Commit classifier provenance integration**
 
 ```powershell
 git add src/bakery_scanner/cpu_benchmark.py src/bakery_scanner/final_evaluation.py tests/test_cpu_benchmark.py tests/test_final_evaluation.py
@@ -387,7 +387,7 @@ git commit -m "fix(artifact): classifier provenance relocation을 허용한다"
 - Consumes: all relocation behavior and test evidence from Tasks 1-3.
 - Produces: user-facing relocation contract and a Ready PR eligible for independent review.
 
-- [ ] **Step 1: Document the relocation rule**
+- [x] **Step 1: Document the relocation rule**
 
 Add an `Artifact 경로 이동` paragraph near the dataset/run provenance sections:
 
@@ -398,7 +398,7 @@ Add an `Artifact 경로 이동` paragraph near the dataset/run provenance sectio
 경로 이동을 위해 다시 쓰지 않습니다.
 ```
 
-- [ ] **Step 2: Run final verification**
+- [x] **Step 2: Run final verification**
 
 Run:
 
@@ -412,7 +412,7 @@ git status --short
 Expected: full suite passes, compileall and diff-check are clean, and only the
 approved source/tests/docs are changed.
 
-- [ ] **Step 3: Confirm protected artifacts are untouched**
+- [x] **Step 3: Confirm protected artifacts are untouched**
 
 Run:
 
@@ -422,7 +422,7 @@ git diff --name-only origin/main...HEAD -- datasets runs models configs/final_ev
 
 Expected: no output.
 
-- [ ] **Step 4: Commit documentation and completed plan checkboxes**
+- [x] **Step 4: Commit documentation and completed plan checkboxes**
 
 ```powershell
 git add README.md docs/superpowers/plans/2026-07-22-artifact-relocation.md
