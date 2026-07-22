@@ -24,6 +24,7 @@ from .detector_evaluation import (
     EvaluationThresholds,
     evaluate_detector_predictions,
 )
+from .detector_postprocess import DetectorPostprocessConfig, filter_detections
 from .errors import DataValidationError
 from .registry import load_class_registry
 from .safety import assert_training_paths_safe
@@ -198,9 +199,27 @@ def load_detector_training_config(path: str | Path) -> DetectorTrainingConfig:
     except (OSError, UnicodeDecodeError, yaml.YAMLError) as exc:
         raise DataValidationError(f"cannot load detector config {config_path}: {exc}") from exc
     payload = _strict_object(payload, _CONFIG_FIELDS, "detector config")
-    threshold_payload = _strict_object(
-        payload["thresholds"], _THRESHOLD_FIELDS, "detector thresholds"
+    threshold_payload = payload["thresholds"]
+    actual_threshold_fields = (
+        set(threshold_payload) if isinstance(threshold_payload, dict) else set()
     )
+    allowed_threshold_fields = _THRESHOLD_FIELDS | {
+        "max_symmetric_aspect_ratio"
+    }
+    if (
+        not isinstance(threshold_payload, dict)
+        or not _THRESHOLD_FIELDS <= actual_threshold_fields
+        or not actual_threshold_fields <= allowed_threshold_fields
+    ):
+        actual = (
+            sorted(threshold_payload)
+            if isinstance(threshold_payload, dict)
+            else type(threshold_payload).__name__
+        )
+        raise DataValidationError(
+            "detector thresholds fields are invalid: "
+            f"required={sorted(_THRESHOLD_FIELDS)}, actual={actual}"
+        )
     thresholds = EvaluationThresholds(
         confidence_floor=_number(
             threshold_payload["confidence_floor"], "confidence_floor"
@@ -210,6 +229,14 @@ def load_detector_training_config(path: str | Path) -> DetectorTrainingConfig:
         ),
         nms_iou=_number(threshold_payload["nms_iou"], "nms_iou"),
         matching_iou=_number(threshold_payload["matching_iou"], "matching_iou"),
+        max_symmetric_aspect_ratio=(
+            _number(
+                threshold_payload["max_symmetric_aspect_ratio"],
+                "max_symmetric_aspect_ratio",
+            )
+            if "max_symmetric_aspect_ratio" in threshold_payload
+            else None
+        ),
     )
     if not 0 < thresholds.confidence_floor <= thresholds.operating_confidence < 1:
         raise DataValidationError("confidence thresholds are invalid")
@@ -247,7 +274,7 @@ def _sha256(path: Path) -> str:
 
 
 def _config_payload(config: DetectorTrainingConfig) -> dict[str, Any]:
-    return {
+    payload = {
         "dataset_root": config.dataset_root,
         "source_detector_run": config.source_detector_run,
         "yolo_run_name": config.yolo_run_name,
@@ -268,6 +295,11 @@ def _config_payload(config: DetectorTrainingConfig) -> dict[str, Any]:
             "matching_iou": config.thresholds.matching_iou,
         },
     }
+    if config.thresholds.max_symmetric_aspect_ratio is not None:
+        payload["thresholds"]["max_symmetric_aspect_ratio"] = (
+            config.thresholds.max_symmetric_aspect_ratio
+        )
+    return payload
 
 
 def _environment_metadata() -> dict[str, Any]:
@@ -383,6 +415,18 @@ def _write_evaluation(
         image_size=config.image_size,
         device=config.device,
     )
+    if config.thresholds.max_symmetric_aspect_ratio is not None:
+        postprocess = DetectorPostprocessConfig(
+            confidence_threshold=config.thresholds.confidence_floor,
+            nms_iou=config.thresholds.nms_iou,
+            max_symmetric_aspect_ratio=(
+                config.thresholds.max_symmetric_aspect_ratio
+            ),
+        )
+        predictions = {
+            image_id: filter_detections(detections, postprocess)
+            for image_id, detections in predictions.items()
+        }
     metrics = evaluate_detector_predictions(images, predictions, config.thresholds)
     checkpoint_hash = _sha256(checkpoint)
     predictions_path = output_dir / "predictions.json"

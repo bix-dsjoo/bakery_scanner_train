@@ -52,6 +52,23 @@ def test_load_detector_training_config_accepts_baseline(tmp_path: Path) -> None:
     assert config.thresholds == EvaluationThresholds()
 
 
+def test_load_detector_training_config_accepts_postprocess_aspect_limit(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "postprocess.yaml"
+    path.write_text(
+        BASELINE_YAML.replace(
+            "  matching_iou: 0.5\n",
+            "  matching_iou: 0.5\n  max_symmetric_aspect_ratio: 2.0\n",
+        ),
+        encoding="utf-8",
+    )
+
+    config = load_detector_training_config(path)
+
+    assert config.thresholds.max_symmetric_aspect_ratio == 2.0
+
+
 def test_checked_in_baseline_uses_pretrained_model_directory() -> None:
     repository_root = Path(__file__).resolve().parents[1]
 
@@ -131,6 +148,26 @@ class RecordingBackend:
         return {path.name: () for path in image_paths}
 
 
+class PostprocessRecordingBackend(RecordingBackend):
+    def predict(
+        self,
+        *,
+        checkpoint: Path,
+        image_paths: Sequence[Path],
+        confidence_floor: float,
+        nms_iou: float,
+        image_size: int,
+        device: str,
+    ) -> Mapping[str, Sequence[Detection]]:
+        detections = (
+            Detection((0.0, 0.0, 100.0, 100.0), 0.90),
+            Detection((5.0, 5.0, 105.0, 105.0), 0.80),
+            Detection((130.0, 0.0, 230.0, 100.0), 0.70),
+            Detection((250.0, 0.0, 270.0, 100.0), 0.85),
+        )
+        return {path.name: detections for path in image_paths}
+
+
 def _training_config(
     dataset_root: Path, tmp_path: Path, pretrained: Path
 ) -> DetectorTrainingConfig:
@@ -191,6 +228,34 @@ def test_train_detector_publishes_reproducible_run(
     assert metrics["split"] == "validation"
     assert metrics["metrics"]["global"]["ground_truth_count"] > 0
     assert metrics["metrics"]["global"]["recall"] == pytest.approx(0.0)
+
+
+def test_train_detector_applies_configured_postprocess_to_saved_predictions(
+    detector_source_run: tuple[Path, str], tmp_path: Path
+) -> None:
+    dataset_root, _ = detector_source_run
+    pretrained = tmp_path / "pretrained.pt"
+    pretrained.write_bytes(b"pretrained checkpoint")
+    base = _training_config(dataset_root, tmp_path, pretrained)
+    config = DetectorTrainingConfig(
+        **{
+            field: getattr(base, field)
+            for field in base.__dataclass_fields__
+            if field != "thresholds"
+        },
+        thresholds=EvaluationThresholds(
+            confidence_floor=0.001,
+            operating_confidence=0.05,
+            nms_iou=0.15,
+            matching_iou=0.5,
+            max_symmetric_aspect_ratio=2.0,
+        ),
+    )
+
+    report = train_detector(config, PostprocessRecordingBackend())
+
+    payload = json.loads(report.predictions_path.read_text(encoding="utf-8"))
+    assert all(len(image["detections"]) == 2 for image in payload["images"])
 
 
 def test_evaluate_detector_checkpoint_rejects_test_path(

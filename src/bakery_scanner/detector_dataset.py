@@ -23,7 +23,8 @@ from .safety import assert_training_paths_safe
 from .splits import SCENE_PATTERN, scene_id_from_path
 from .synthetic import validate_synthetic_dataset
 
-BUILDER_VERSION = "1.0.0"
+LEGACY_BUILDER_VERSION = "1.0.0"
+BUILDER_VERSION = "1.1.0"
 MANIFEST_VERSION = 1
 _RUN_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 _SPLITS = ("train", "validation")
@@ -129,6 +130,8 @@ class _BaseCycleAuthority:
     development_backgrounds: dict[str, str | None]
     manifest_path: Path
     manifest_sha256: str
+    real_coco_path: Path
+    real_coco_sha256: str
 
 
 def _sha256(path: Path) -> str:
@@ -168,7 +171,22 @@ def _load_base_cycle_authority(root: Path, run_name: str) -> _BaseCycleAuthority
         development_backgrounds=backgrounds,
         manifest_path=report.manifest_path,
         manifest_sha256=_sha256(report.manifest_path),
+        real_coco_path=(root / payload["real_coco"]["path"]).resolve(strict=False),
+        real_coco_sha256=str(payload["real_coco"]["sha256"]),
     )
+
+
+def _assert_cycle_real_coco_authorized(
+    real_coco_path: Path, authority: _BaseCycleAuthority
+) -> None:
+    if real_coco_path != authority.real_coco_path:
+        raise DataValidationError(
+            "real COCO path differs from frozen Base cycle authority"
+        )
+    if _sha256(real_coco_path) != authority.real_coco_sha256:
+        raise DataValidationError(
+            "real COCO hash differs from frozen Base cycle authority"
+        )
 
 
 def _manifest_path(path: Path, manifest_dir: Path) -> str:
@@ -751,6 +769,7 @@ def _validate_source_inputs(
         if not isinstance(cycle_run, str) or not cycle_run:
             raise DataValidationError("cycle_run must be a non-empty string")
         authority = _load_base_cycle_authority(root, cycle_run)
+        _assert_cycle_real_coco_authorized(real_coco_path, authority)
         cycle_input = _expect_keys(
             inputs.get("base_cycle"), {"path", "sha256"}, "Base cycle input"
         )
@@ -936,17 +955,17 @@ def _validate_run_dir(root: Path, output_dir: Path) -> DetectorValidationReport:
         raise DataValidationError("detector manifest fields do not match schema")
     if manifest.get("manifest_version") != MANIFEST_VERSION:
         raise DataValidationError("unsupported detector manifest version")
-    if manifest.get("builder_version") != BUILDER_VERSION:
+    builder_version = manifest.get("builder_version")
+    if builder_version not in {LEGACY_BUILDER_VERSION, BUILDER_VERSION}:
         raise DataValidationError("unsupported detector builder version")
     raw_config = manifest.get("config")
     if not isinstance(raw_config, dict):
         raise DataValidationError("detector config must be an object")
-    cycle_mode = "assignment_mode" in raw_config
     config_fields = {"seed", "validation_fraction", "real_coco_path", "synthetic_run"}
-    if cycle_mode:
-        config_fields.update(
-            {"assignment_mode", "cycle_run", "validation_scene_id"}
-        )
+    if builder_version == BUILDER_VERSION:
+        config_fields.add("assignment_mode")
+        if raw_config.get("assignment_mode") == "base_cycle_fold":
+            config_fields.update({"cycle_run", "validation_scene_id"})
     config = _expect_keys(raw_config, config_fields, "detector config")
     parsed_config = DetectorDatasetConfig(
         seed=config.get("seed"),
@@ -1072,6 +1091,7 @@ def _validate_run_dir(root: Path, output_dir: Path) -> DetectorValidationReport:
         annotation_count=annotation_total,
         train_image_count=split_counts["train"],
         validation_image_count=split_counts["validation"],
+        builder_version=str(builder_version),
     )
 
 
@@ -1101,6 +1121,7 @@ def build_detector_dataset(
         assert config.cycle_run is not None
         assert config.validation_scene_id is not None
         authority = _load_base_cycle_authority(root, config.cycle_run)
+        _assert_cycle_real_coco_authorized(real_coco_path, authority)
     allowed_scene_ids = (
         frozenset(authority.development_scene_ids) if authority is not None else None
     )
@@ -1138,6 +1159,7 @@ def build_detector_dataset(
             "validation_fraction": config.validation_fraction,
             "real_coco_path": _manifest_path(real_coco_path, staging_dir),
             "synthetic_run": synthetic_run,
+            "assignment_mode": config.assignment_mode,
         }
         manifest_inputs: dict[str, Any] = {
             "real_coco": {
@@ -1152,7 +1174,6 @@ def build_detector_dataset(
         if authority is not None:
             manifest_config.update(
                 {
-                    "assignment_mode": config.assignment_mode,
                     "cycle_run": config.cycle_run,
                     "validation_scene_id": config.validation_scene_id,
                 }

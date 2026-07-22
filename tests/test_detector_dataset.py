@@ -171,6 +171,10 @@ def test_build_base_cycle_fold_records_authority_and_exact_assignments(
         development_backgrounds={path: None for path in background_paths},
         manifest_path=authority_manifest.resolve(),
         manifest_sha256=hashlib.sha256(authority_manifest.read_bytes()).hexdigest(),
+        real_coco_path=(detector_inputs / "base/val/instances_val.json").resolve(),
+        real_coco_sha256=hashlib.sha256(
+            (detector_inputs / "base/val/instances_val.json").read_bytes()
+        ).hexdigest(),
     )
     monkeypatch.setattr(
         detector_module,
@@ -203,6 +207,53 @@ def test_build_base_cycle_fold_records_authority_and_exact_assignments(
     assert {
         item["split"] for item in manifest["samples"] if item["origin"] == "synthetic"
     } == {"train"}
+
+
+def test_build_base_cycle_fold_rejects_coco_outside_frozen_authority(
+    detector_inputs: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    frozen_coco = (detector_inputs / "base/val/instances_val.json").resolve()
+    authority = SimpleNamespace(
+        development_scene_ids=("0001", "0002"),
+        development_backgrounds={},
+        manifest_path=(detector_inputs / "cycle.json").resolve(),
+        manifest_sha256="0" * 64,
+        real_coco_path=frozen_coco,
+        real_coco_sha256=hashlib.sha256(frozen_coco.read_bytes()).hexdigest(),
+    )
+    monkeypatch.setattr(
+        detector_module, "_load_base_cycle_authority", lambda root, run: authority
+    )
+
+    with pytest.raises(DataValidationError, match="frozen Base cycle authority"):
+        build_detector_dataset(
+            detector_inputs,
+            "input",
+            "wrong-coco",
+            DetectorDatasetConfig(
+                assignment_mode="base_cycle_fold",
+                cycle_run="unit",
+                validation_scene_id="0001",
+                real_coco_path="collected/alternate.json",
+            ),
+        )
+
+
+def test_validator_accepts_legacy_builder_manifest(detector_inputs: Path) -> None:
+    report = build_detector_dataset(
+        detector_inputs,
+        "input",
+        "legacy-compatible",
+        DetectorDatasetConfig(seed=19, validation_fraction=1 / 3),
+    )
+    payload = _load_json(report.manifest_path)
+    payload["builder_version"] = "1.0.0"
+    payload["config"].pop("assignment_mode")
+    _write_json(report.manifest_path, payload)
+
+    validated = validate_detector_dataset(detector_inputs, "legacy-compatible")
+
+    assert validated.builder_version == "1.0.0"
 
 
 def test_real_sample_allowlist_filters_before_sample_hashing(

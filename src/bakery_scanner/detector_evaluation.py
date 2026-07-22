@@ -35,6 +35,7 @@ class EvaluationThresholds:
     operating_confidence: float = 0.25
     nms_iou: float = 0.7
     matching_iou: float = 0.5
+    max_symmetric_aspect_ratio: float | None = None
 
 
 def _validate_box(
@@ -143,6 +144,16 @@ def _validate_thresholds(thresholds: EvaluationThresholds) -> None:
         raise DataValidationError("confidence thresholds are invalid")
     if not 0 < thresholds.nms_iou <= 1 or not 0 < thresholds.matching_iou <= 1:
         raise DataValidationError("IoU thresholds must be in (0, 1]")
+    aspect = thresholds.max_symmetric_aspect_ratio
+    if aspect is not None and (
+        isinstance(aspect, bool)
+        or not isinstance(aspect, (int, float))
+        or not math.isfinite(aspect)
+        or aspect <= 1
+    ):
+        raise DataValidationError(
+            "max_symmetric_aspect_ratio must be finite and greater than 1"
+        )
 
 
 def _group_metrics(
