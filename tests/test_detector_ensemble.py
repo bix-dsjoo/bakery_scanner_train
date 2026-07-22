@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -14,6 +15,7 @@ from bakery_scanner.detector_ensemble import (
     evaluate_detector_ensemble,
     load_detector_ensemble_config,
     merge_member_predictions,
+    _validation_signature,
 )
 from bakery_scanner.detector_evaluation import Detection
 from bakery_scanner.detector_postprocess import DetectorPostprocessConfig
@@ -203,21 +205,22 @@ def _evaluation_fixture(
     detector_source_run: tuple[Path, str], tmp_path: Path, *, drift: bool = False
 ) -> tuple[DetectorEnsembleConfig, dict[str, tuple[Detection, ...]], tuple[Path, Path]]:
     dataset_root, source_run = detector_source_run
-    first_yolo = build_yolo_dataset(dataset_root, source_run, "ensemble-yolo-a")
-    second_yolo = build_yolo_dataset(dataset_root, source_run, "ensemble-yolo-b")
+    (tmp_path / "pyproject.toml").write_text("[project]\nname='fixture'\n", encoding="utf-8")
+    first_yolo = build_yolo_dataset(dataset_root, source_run, "ensemble-yolo-a_val0503")
+    second_yolo = build_yolo_dataset(dataset_root, source_run, "ensemble-yolo-b_val0503")
     configs = (tmp_path / "configs" / "first.yaml", tmp_path / "configs" / "second.yaml")
     _write_selected_config(
         configs[0],
         dataset_root=dataset_root,
         source_run=source_run,
-        yolo_run="ensemble-yolo-a",
+        yolo_run="ensemble-yolo-a_val0503",
         seed=42,
     )
     _write_selected_config(
         configs[1],
         dataset_root=dataset_root,
         source_run=source_run,
-        yolo_run="ensemble-yolo-b",
+        yolo_run="ensemble-yolo-b_val0503",
         seed=44,
         operating_confidence=0.3 if drift else 0.2,
     )
@@ -237,15 +240,35 @@ def _evaluation_fixture(
         )
         for config, checkpoint in zip(configs, checkpoints, strict=True)
     )
-    config = DetectorEnsembleConfig(
-        dataset_root=str(dataset_root),
-        output_root=str(tmp_path / "ensemble-runs"),
-        run_name="ensemble-evaluation",
-        members=(members[0], members[1]),
-        cpu_threads=8,
-        cpu_warmups=1,
-        cpu_repetitions=3,
+    ensemble_path = tmp_path / "configs" / "detector_ensemble" / "fixture.yaml"
+    ensemble_path.parent.mkdir(parents=True, exist_ok=True)
+    ensemble_path.write_text(
+        _config_yaml(
+            members=_member_yaml(1, config_sha=_SHA_A, checkpoint_sha=_SHA_B)
+            + _member_yaml(2, config_sha=_SHA_C, checkpoint_sha=_SHA_D)
+        ),
+        encoding="utf-8",
     )
+    payload = json.loads(json.dumps({
+        "dataset_root": str(dataset_root),
+        "output_root": str(tmp_path / "ensemble-runs"),
+        "run_name": "ensemble-evaluation",
+        "members": [
+            {
+                "config_path": str(member.config_path),
+                "config_sha256": member.config_sha256,
+                "checkpoint_path": str(member.checkpoint_path),
+                "checkpoint_sha256": member.checkpoint_sha256,
+            }
+            for member in members
+        ],
+        "cpu_threads": 8,
+        "cpu_warmups": 1,
+        "cpu_repetitions": 3,
+    }))
+    import yaml
+    ensemble_path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+    config = load_detector_ensemble_config(ensemble_path)
     return config, _truth_detections(first_yolo.manifest_path), checkpoints
 
 
@@ -318,15 +341,7 @@ def test_evaluate_ensemble_rejects_config_hash_drift(
         config.members[0].checkpoint_path,
         config.members[0].checkpoint_sha256,
     )
-    config = DetectorEnsembleConfig(
-        config.dataset_root,
-        config.output_root,
-        config.run_name,
-        (bad_member, config.members[1]),
-        config.cpu_threads,
-        config.cpu_warmups,
-        config.cpu_repetitions,
-    )
+    config = replace(config, members=(bad_member, config.members[1]))
 
     with pytest.raises(DataValidationError, match="config SHA-256"):
         evaluate_detector_ensemble(config, ComplementaryBackend(truth))
@@ -392,6 +407,7 @@ def test_cpu_benchmark_records_complete_ensemble_samples_and_excludes_warmup(
 
     payload = json.loads(benchmark_path.read_text(encoding="utf-8"))
     image_count = payload["context"]["image_count"]
+    assert payload["split"] == "validation"
     assert payload["context"]["device"] == "cpu"
     assert payload["context"]["execution_provider"] == "torch-cpu"
     assert payload["context"]["threads"] == 8
@@ -427,6 +443,129 @@ def test_cpu_benchmark_rejects_checkpoint_mutation(
         )
 
     assert not (Path(config.output_root) / config.run_name / "benchmark.json").exists()
+
+
+@pytest.mark.parametrize("nested", ["base/test", "incremental/test"])
+def test_evaluate_ensemble_rejects_noncanonical_test_dataset_root_before_member_read(
+    detector_source_run: tuple[Path, str], tmp_path: Path, nested: str
+) -> None:
+    config, truth, _checkpoints = _evaluation_fixture(detector_source_run, tmp_path)
+    config = replace(config, dataset_root=str(Path(config.dataset_root) / nested))
+
+    with pytest.raises(DataValidationError, match="canonical project datasets"):
+        evaluate_detector_ensemble(config, ComplementaryBackend(truth))
+
+
+def test_evaluate_ensemble_rejects_cycle_holdout_fold_before_yolo_validation(
+    detector_source_run: tuple[Path, str], tmp_path: Path
+) -> None:
+    config, truth, _checkpoints = _evaluation_fixture(detector_source_run, tmp_path)
+    holdout_config = Path(config.members[0].config_path)
+    _write_selected_config(
+        holdout_config,
+        dataset_root=Path(config.dataset_root),
+        source_run="base_v2_s42_val0510",
+        yolo_run="base_v2_s42_val0510",
+        seed=42,
+    )
+    member = replace(config.members[0], config_sha256=_sha256(holdout_config))
+    config = replace(config, members=(member, config.members[1]))
+
+    with pytest.raises(DataValidationError, match="approved development folds"):
+        evaluate_detector_ensemble(config, ComplementaryBackend(truth))
+
+
+def test_evaluate_ensemble_rejects_member_aliases_after_resolution(
+    detector_source_run: tuple[Path, str], tmp_path: Path
+) -> None:
+    config, truth, _checkpoints = _evaluation_fixture(detector_source_run, tmp_path)
+    first = config.members[0]
+    config_path = Path(first.config_path)
+    checkpoint_path = Path(first.checkpoint_path)
+    alias = DetectorEnsembleMember(
+        str(config_path.parent / ".." / config_path.parent.name / config_path.name),
+        first.config_sha256,
+        str(
+            checkpoint_path.parent
+            / ".."
+            / checkpoint_path.parent.name
+            / checkpoint_path.name
+        ),
+        first.checkpoint_sha256,
+    )
+    config = replace(config, members=(first, alias))
+
+    with pytest.raises(DataValidationError, match="resolved member paths must be unique"):
+        evaluate_detector_ensemble(config, ComplementaryBackend(truth))
+
+
+@pytest.mark.parametrize(
+    ("field", "changed_value"),
+    [
+        ("image_path", "alternate/images/scene.jpg"),
+        ("image_sha256", "c" * 64),
+        ("label_path", "alternate/labels/scene.txt"),
+        ("label_sha256", "d" * 64),
+    ],
+)
+def test_validation_signature_detects_path_and_hash_drift(
+    tmp_path: Path, field: str, changed_value: str
+) -> None:
+    base = {
+        "samples": [
+            {
+                "split": "validation",
+                "image_path": "validation/images/scene.jpg",
+                "image_sha256": "a" * 64,
+                "label_path": "validation/labels/scene.txt",
+                "label_sha256": "b" * 64,
+                "width": 10,
+                "height": 10,
+                "annotation_count": 0,
+                "original_annotations": [],
+            }
+        ]
+    }
+    first = tmp_path / "first.json"
+    second = tmp_path / "second.json"
+    first.write_text(json.dumps(base), encoding="utf-8")
+    changed = json.loads(json.dumps(base))
+    changed["samples"][0][field] = changed_value
+    second.write_text(json.dumps(changed), encoding="utf-8")
+
+    assert _validation_signature(first) != _validation_signature(second)
+
+
+def test_cpu_benchmark_rejects_config_different_from_completed_evaluation(
+    detector_source_run: tuple[Path, str], tmp_path: Path
+) -> None:
+    config, truth, _checkpoints = _evaluation_fixture(detector_source_run, tmp_path)
+    evaluate_detector_ensemble(config, ComplementaryBackend(truth))
+    changed = replace(config, cpu_threads=4)
+
+    with pytest.raises(DataValidationError, match="does not match completed evaluation"):
+        benchmark_detector_ensemble_cpu(changed, RecordingCpuBackend())
+
+
+def test_cpu_benchmark_revalidates_evaluation_binding_before_publish(
+    detector_source_run: tuple[Path, str], tmp_path: Path
+) -> None:
+    config, truth, _checkpoints = _evaluation_fixture(detector_source_run, tmp_path)
+    report = evaluate_detector_ensemble(config, ComplementaryBackend(truth))
+
+    class MutatingEvaluationBackend(RecordingCpuBackend):
+        def predict(self, **kwargs) -> Sequence[Detection]:
+            result = super().predict(**kwargs)
+            if len(self.predict_calls) == 1:
+                (report.output_dir / "config.json").write_text(
+                    "{}\n", encoding="utf-8"
+                )
+            return result
+
+    with pytest.raises(DataValidationError, match="does not match completed evaluation"):
+        benchmark_detector_ensemble_cpu(config, MutatingEvaluationBackend())
+
+    assert not (report.output_dir / "benchmark.json").exists()
 
 
 def test_repository_ensemble_configs_are_frozen_and_loadable() -> None:

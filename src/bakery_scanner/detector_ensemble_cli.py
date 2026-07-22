@@ -54,6 +54,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         config = load_detector_ensemble_config(args.config)
         if not args.json:
             selection = _selection(config)
+            print("Split: validation")
             print(f"Dataset root: {selection['dataset_root']}")
             for index, member in enumerate(selection["members"]):
                 print(f"Member {index} config: {member['config']}")

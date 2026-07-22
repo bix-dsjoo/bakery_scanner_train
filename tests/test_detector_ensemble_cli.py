@@ -100,3 +100,22 @@ def test_ensemble_benchmark_cli_emits_json(
     assert exit_code == 0
     assert payload["benchmark"]["timing"]["count"] == 18
     assert payload["benchmark_path"] == str(benchmark)
+
+
+def test_ensemble_cli_prints_validation_split(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    config = _config(tmp_path)
+    report = _report(tmp_path)
+    monkeypatch.setattr(
+        detector_ensemble_cli, "load_detector_ensemble_config", lambda path: config
+    )
+    monkeypatch.setattr(
+        detector_ensemble_cli, "evaluate_detector_ensemble", lambda value: report
+    )
+
+    exit_code = detector_ensemble_cli.main(["evaluate", "--config", "ensemble.yaml"])
+
+    output = capsys.readouterr().out
+    assert exit_code == 0
+    assert "Split: validation" in output

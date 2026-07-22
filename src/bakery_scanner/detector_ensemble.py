@@ -48,6 +48,8 @@ _MEMBER_FIELDS = {
     "checkpoint_path",
     "checkpoint_sha256",
 }
+_FOLD_TOKEN = re.compile(r"(?:^|_)val(\d{4})(?:_|$)")
+_APPROVED_DEVELOPMENT_FOLDS = frozenset({"0503", "0509"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,6 +69,7 @@ class DetectorEnsembleConfig:
     cpu_threads: int
     cpu_warmups: int
     cpu_repetitions: int
+    source_path: Path | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -143,7 +146,7 @@ def _integer(value: object, label: str, *, allow_zero: bool = False) -> int:
 
 
 def load_detector_ensemble_config(path: str | Path) -> DetectorEnsembleConfig:
-    source = Path(path)
+    source = Path(path).resolve(strict=False)
     try:
         payload = yaml.safe_load(source.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, yaml.YAMLError) as exc:
@@ -182,6 +185,7 @@ def load_detector_ensemble_config(path: str | Path) -> DetectorEnsembleConfig:
         cpu_threads=_integer(payload["cpu_threads"], "cpu_threads"),
         cpu_warmups=_integer(payload["cpu_warmups"], "cpu_warmups", allow_zero=True),
         cpu_repetitions=_integer(payload["cpu_repetitions"], "cpu_repetitions"),
+        source_path=source,
     )
 
 
@@ -235,6 +239,58 @@ def _resolve_project_path(value: str, project_root: Path) -> Path:
     return (path if path.is_absolute() else project_root / path).resolve(strict=False)
 
 
+def _repository_context(config: DetectorEnsembleConfig) -> tuple[Path, Path]:
+    if config.source_path is None:
+        raise DataValidationError(
+            "detector ensemble config must be loaded from a repository config file"
+        )
+    source = config.source_path.resolve(strict=False)
+    repository_root = next(
+        (
+            parent
+            for parent in source.parents
+            if (parent / "pyproject.toml").is_file()
+            and (parent / "datasets").is_dir()
+        ),
+        None,
+    )
+    if repository_root is None:
+        raise DataValidationError(
+            "detector ensemble config is not inside a project with datasets"
+        )
+    config_root = (repository_root / "configs").resolve(strict=False)
+    try:
+        source.relative_to(config_root)
+    except ValueError as exc:
+        raise DataValidationError(
+            "detector ensemble config must be stored under project configs"
+        ) from exc
+    expected_dataset_root = (repository_root / "datasets").resolve(strict=False)
+    configured_dataset_root = _resolve_project_path(
+        config.dataset_root, repository_root
+    )
+    if configured_dataset_root != expected_dataset_root:
+        raise DataValidationError(
+            "dataset_root must be the canonical project datasets directory"
+        )
+    return repository_root, expected_dataset_root
+
+
+def _assert_approved_development_fold(
+    config: DetectorTrainingConfig, index: int
+) -> None:
+    values = (config.source_detector_run, config.yolo_run_name)
+    folds = {
+        match.group(1)
+        for value in values
+        for match in _FOLD_TOKEN.finditer(value)
+    }
+    if not folds or not folds <= _APPROVED_DEVELOPMENT_FOLDS:
+        raise DataValidationError(
+            f"ensemble member {index} must use approved development folds 0503/0509"
+        )
+
+
 def _validation_signature(manifest_path: Path) -> tuple[tuple[object, ...], ...]:
     try:
         payload = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -246,9 +302,9 @@ def _validation_signature(manifest_path: Path) -> tuple[tuple[object, ...], ...]
             continue
         samples.append(
             (
-                Path(sample["image_path"]).name,
+                Path(sample["image_path"]).as_posix(),
                 sample["image_sha256"],
-                Path(sample["label_path"]).name,
+                Path(sample["label_path"]).as_posix(),
                 sample["label_sha256"],
                 sample["width"],
                 sample["height"],
@@ -261,13 +317,23 @@ def _validation_signature(manifest_path: Path) -> tuple[tuple[object, ...], ...]
     return tuple(sorted(samples))
 
 
-def _prepare_members(config: DetectorEnsembleConfig) -> tuple[_PreparedMember, ...]:
-    dataset_root = Path(config.dataset_root).resolve(strict=False)
-    project_root = dataset_root.parent
+def _prepare_members(
+    config: DetectorEnsembleConfig, dataset_root: Path, project_root: Path
+) -> tuple[_PreparedMember, ...]:
+    resolved = tuple(
+        (
+            _resolve_project_path(member.config_path, project_root),
+            _resolve_project_path(member.checkpoint_path, project_root),
+        )
+        for member in config.members
+    )
+    if len({item[0] for item in resolved}) != 2 or len(
+        {item[1] for item in resolved}
+    ) != 2:
+        raise DataValidationError("resolved member paths must be unique")
     prepared = []
-    for index, declared in enumerate(config.members):
-        config_path = _resolve_project_path(declared.config_path, project_root)
-        checkpoint_path = _resolve_project_path(declared.checkpoint_path, project_root)
+    for index, (declared, paths) in enumerate(zip(config.members, resolved, strict=True)):
+        config_path, checkpoint_path = paths
         assert_training_paths_safe([config_path, checkpoint_path], dataset_root)
         if not config_path.is_file():
             raise DataValidationError(f"ensemble member {index} config is missing: {config_path}")
@@ -282,10 +348,11 @@ def _prepare_members(config: DetectorEnsembleConfig) -> tuple[_PreparedMember, .
                 f"ensemble member {index} checkpoint SHA-256 mismatch"
             )
         member_config = load_detector_training_config(config_path)
-        if Path(member_config.dataset_root).resolve(strict=False) != dataset_root:
+        if _resolve_project_path(member_config.dataset_root, project_root) != dataset_root:
             raise DataValidationError(
                 f"ensemble member {index} dataset_root does not match ensemble config"
             )
+        _assert_approved_development_fold(member_config, index)
         yolo_report = validate_yolo_dataset(dataset_root, member_config.yolo_run_name)
         prepared.append(
             _PreparedMember(
@@ -382,6 +449,82 @@ def _write_json(path: Path, payload: object) -> None:
     )
 
 
+def _json_object(path: Path, label: str) -> dict[str, Any]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise DataValidationError(f"cannot load {label} {path}: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise DataValidationError(f"{label} must be a JSON object")
+    return payload
+
+
+def _signature_sha256(signature: tuple[tuple[object, ...], ...]) -> str:
+    encoded = json.dumps(
+        signature, ensure_ascii=False, separators=(",", ":"), sort_keys=True
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _metadata_members(members: Sequence[_PreparedMember]) -> list[dict[str, object]]:
+    return [
+        {
+            "order": index,
+            "config_path": str(member.config_path),
+            "config_sha256": member.declared.config_sha256,
+            "checkpoint_path": str(member.checkpoint_path),
+            "checkpoint_sha256": member.declared.checkpoint_sha256,
+            "yolo_run_name": member.config.yolo_run_name,
+        }
+        for index, member in enumerate(members)
+    ]
+
+
+def _validate_completed_evaluation_binding(
+    output_dir: Path,
+    config: DetectorEnsembleConfig,
+    members: Sequence[_PreparedMember],
+) -> None:
+    required = {
+        "config.json",
+        "metadata.json",
+        "predictions.json",
+        "metrics.json",
+    }
+    if not output_dir.is_dir() or any(
+        not (output_dir / name).is_file() for name in required
+    ):
+        raise DataValidationError("ensemble evaluation must complete before CPU benchmark")
+    recorded_config = _json_object(output_dir / "config.json", "ensemble config")
+    if recorded_config != _canonical_config(config):
+        raise DataValidationError(
+            "benchmark config does not match completed evaluation"
+        )
+    metadata = _json_object(output_dir / "metadata.json", "ensemble metadata")
+    if (
+        metadata.get("ensemble_version") != 1
+        or metadata.get("split") != "validation"
+        or metadata.get("members") != _metadata_members(members)
+        or metadata.get("validation_signature_sha256")
+        != _signature_sha256(members[0].validation_signature)
+    ):
+        raise DataValidationError(
+            "benchmark metadata does not match completed evaluation"
+        )
+    predictions = _json_object(
+        output_dir / "predictions.json", "ensemble predictions"
+    )
+    if predictions.get("split") != "validation" or predictions.get(
+        "member_checkpoint_sha256"
+    ) != [member.declared.checkpoint_sha256 for member in members]:
+        raise DataValidationError(
+            "benchmark predictions do not match completed evaluation"
+        )
+    metrics = _json_object(output_dir / "metrics.json", "ensemble metrics")
+    if metrics.get("split") != "validation":
+        raise DataValidationError("benchmark metrics do not match completed evaluation")
+
+
 def evaluate_detector_ensemble(
     config: DetectorEnsembleConfig,
     backend: DetectorBackend | None = None,
@@ -389,13 +532,13 @@ def evaluate_detector_ensemble(
     if not isinstance(config, DetectorEnsembleConfig):
         raise DataValidationError("config must be DetectorEnsembleConfig")
     selected_backend = backend or UltralyticsBackend()
-    dataset_root = Path(config.dataset_root).resolve(strict=False)
-    output_root = Path(config.output_root).resolve(strict=False)
+    project_root, dataset_root = _repository_context(config)
+    output_root = _resolve_project_path(config.output_root, project_root)
     output_dir = output_root / config.run_name
     assert_training_paths_safe([output_root, output_dir], dataset_root)
     if output_dir.exists():
         raise DataValidationError(f"detector ensemble run already exists: {output_dir}")
-    members = _prepare_members(config)
+    members = _prepare_members(config, dataset_root, project_root)
     _validate_member_compatibility(members)
     device = members[0].config.device
     if not selected_backend.cuda_available(device):
@@ -445,17 +588,10 @@ def evaluate_detector_ensemble(
             "ensemble_version": 1,
             "created_at": datetime.now(timezone.utc).isoformat(),
             "split": "validation",
-            "members": [
-                {
-                    "order": index,
-                    "config_path": str(member.config_path),
-                    "config_sha256": member.declared.config_sha256,
-                    "checkpoint_path": str(member.checkpoint_path),
-                    "checkpoint_sha256": member.declared.checkpoint_sha256,
-                    "yolo_run_name": member.config.yolo_run_name,
-                }
-                for index, member in enumerate(members)
-            ],
+            "members": _metadata_members(members),
+            "validation_signature_sha256": _signature_sha256(
+                members[0].validation_signature
+            ),
             "environment": _environment_metadata(),
         }
         _write_json(staging / "config.json", _canonical_config(config))
@@ -582,17 +718,15 @@ def benchmark_detector_ensemble_cpu(
     selected_backend = backend or UltralyticsEnsembleCpuBackend()
     if selected_backend.execution_provider() != "torch-cpu":
         raise DataValidationError("ensemble benchmark requires the torch CPU provider")
-    dataset_root = Path(config.dataset_root).resolve(strict=False)
-    output_dir = Path(config.output_root).resolve(strict=False) / config.run_name
+    project_root, dataset_root = _repository_context(config)
+    output_dir = _resolve_project_path(config.output_root, project_root) / config.run_name
     benchmark_path = output_dir / "benchmark.json"
     assert_training_paths_safe([output_dir, benchmark_path], dataset_root)
-    required = tuple(output_dir / name for name in ("metadata.json", "metrics.json"))
-    if not output_dir.is_dir() or any(not path.is_file() for path in required):
-        raise DataValidationError("ensemble evaluation must complete before CPU benchmark")
     if benchmark_path.exists():
         raise DataValidationError(f"ensemble benchmark already exists: {benchmark_path}")
-    members = _prepare_members(config)
+    members = _prepare_members(config, dataset_root, project_root)
     _validate_member_compatibility(members)
+    _validate_completed_evaluation_binding(output_dir, config, members)
     member_inputs = [_evaluation_inputs(dataset_root, member.yolo_dir) for member in members]
     images, first_paths = member_inputs[0]
     if any(item[0] != images for item in member_inputs[1:]):
@@ -658,6 +792,7 @@ def benchmark_detector_ensemble_cpu(
     payload = {
         "benchmark_version": 1,
         "created_at": datetime.now(timezone.utc).isoformat(),
+        "split": "validation",
         "context": {
             "device": "cpu",
             "execution_provider": selected_backend.execution_provider(),
@@ -687,6 +822,7 @@ def benchmark_detector_ensemble_cpu(
         "timing": _timing_statistics(durations),
         "samples": samples,
     }
+    _validate_completed_evaluation_binding(output_dir, config, members)
     temporary = output_dir / f"benchmark.json.tmp-{uuid.uuid4().hex}"
     try:
         _write_json(temporary, payload)
