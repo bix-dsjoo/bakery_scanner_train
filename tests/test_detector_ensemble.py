@@ -10,6 +10,7 @@ import pytest
 from bakery_scanner.detector_ensemble import (
     DetectorEnsembleConfig,
     DetectorEnsembleMember,
+    benchmark_detector_ensemble_cpu,
     evaluate_detector_ensemble,
     load_detector_ensemble_config,
     merge_member_predictions,
@@ -358,3 +359,71 @@ def test_evaluate_ensemble_rejects_checkpoint_changed_during_inference(
         evaluate_detector_ensemble(config, MutatingBackend(truth))
 
     assert not (Path(config.output_root) / config.run_name).exists()
+
+
+class RecordingCpuBackend:
+    def __init__(self, *, provider: str = "torch-cpu", mutate: Path | None = None) -> None:
+        self.provider = provider
+        self.mutate = mutate
+        self.prepare_calls: list[tuple[tuple[Path, ...], int]] = []
+        self.predict_calls: list[dict[str, object]] = []
+
+    def execution_provider(self) -> str:
+        return self.provider
+
+    def prepare(self, checkpoints: Sequence[Path], threads: int) -> None:
+        self.prepare_calls.append((tuple(checkpoints), threads))
+
+    def predict(self, **kwargs) -> Sequence[Detection]:
+        self.predict_calls.append(kwargs)
+        if self.mutate is not None and len(self.predict_calls) == 1:
+            self.mutate.write_bytes(b"mutated-by-benchmark")
+        return ()
+
+
+def test_cpu_benchmark_records_complete_ensemble_samples_and_excludes_warmup(
+    detector_source_run: tuple[Path, str], tmp_path: Path
+) -> None:
+    config, truth, _checkpoints = _evaluation_fixture(detector_source_run, tmp_path)
+    evaluate_detector_ensemble(config, ComplementaryBackend(truth))
+    backend = RecordingCpuBackend()
+
+    benchmark_path = benchmark_detector_ensemble_cpu(config, backend)
+
+    payload = json.loads(benchmark_path.read_text(encoding="utf-8"))
+    image_count = payload["context"]["image_count"]
+    assert payload["context"]["device"] == "cpu"
+    assert payload["context"]["execution_provider"] == "torch-cpu"
+    assert payload["context"]["threads"] == 8
+    assert payload["warmup_invocation_count"] == image_count
+    assert payload["timing"]["count"] == image_count * 3
+    assert len(payload["samples"]) == image_count * 3
+    assert len(backend.predict_calls) == image_count * (1 + 3) * 2
+    assert all(call["device"] == "cpu" for call in backend.predict_calls)
+    assert backend.prepare_calls[0][1] == 8
+
+
+def test_cpu_benchmark_rejects_non_cpu_provider(
+    detector_source_run: tuple[Path, str], tmp_path: Path
+) -> None:
+    config, truth, _checkpoints = _evaluation_fixture(detector_source_run, tmp_path)
+    evaluate_detector_ensemble(config, ComplementaryBackend(truth))
+
+    with pytest.raises(DataValidationError, match="CPU provider"):
+        benchmark_detector_ensemble_cpu(
+            config, RecordingCpuBackend(provider="CUDAExecutionProvider")
+        )
+
+
+def test_cpu_benchmark_rejects_checkpoint_mutation(
+    detector_source_run: tuple[Path, str], tmp_path: Path
+) -> None:
+    config, truth, checkpoints = _evaluation_fixture(detector_source_run, tmp_path)
+    evaluate_detector_ensemble(config, ComplementaryBackend(truth))
+
+    with pytest.raises(DataValidationError, match="changed during CPU benchmark"):
+        benchmark_detector_ensemble_cpu(
+            config, RecordingCpuBackend(mutate=checkpoints[0])
+        )
+
+    assert not (Path(config.output_root) / config.run_name / "benchmark.json").exists()

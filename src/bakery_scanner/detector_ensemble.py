@@ -2,14 +2,18 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
+import os
+import platform
 import re
 import shutil
+import time
 import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 import yaml
 
@@ -88,6 +92,23 @@ class DetectorEnsembleReport:
         if self.benchmark_path is not None:
             result["benchmark_path"] = str(self.benchmark_path)
         return result
+
+
+class DetectorEnsembleCpuBackend(Protocol):
+    def execution_provider(self) -> str: ...
+
+    def prepare(self, checkpoints: Sequence[Path], threads: int) -> None: ...
+
+    def predict(
+        self,
+        *,
+        checkpoint: Path,
+        image_path: Path,
+        confidence_floor: float,
+        nms_iou: float,
+        image_size: int,
+        device: str,
+    ) -> Sequence[Detection]: ...
 
 
 def _strict_object(value: object, fields: set[str], label: str) -> dict[str, Any]:
@@ -468,3 +489,209 @@ def evaluate_detector_ensemble(
         output_dir / "predictions.json",
         output_dir / "metrics.json",
     )
+
+
+def _percentile(values: Sequence[float], probability: float) -> float:
+    ordered = sorted(float(value) for value in values)
+    if not ordered:
+        raise DataValidationError("timing samples must not be empty")
+    position = (len(ordered) - 1) * probability
+    lower = math.floor(position)
+    upper = math.ceil(position)
+    if lower == upper:
+        return ordered[lower]
+    return ordered[lower] + (ordered[upper] - ordered[lower]) * (position - lower)
+
+
+def _timing_statistics(values: Sequence[float]) -> dict[str, float | int]:
+    samples = tuple(float(value) for value in values)
+    if not samples or any(not math.isfinite(value) or value < 0 for value in samples):
+        raise DataValidationError("timing samples must be finite non-negative values")
+    return {
+        "count": len(samples),
+        "mean_ms": sum(samples) / len(samples),
+        "p50_ms": _percentile(samples, 0.5),
+        "p95_ms": _percentile(samples, 0.95),
+    }
+
+
+class UltralyticsEnsembleCpuBackend:
+    def __init__(self) -> None:
+        self._models: dict[Path, object] = {}
+
+    def execution_provider(self) -> str:
+        return "torch-cpu"
+
+    def prepare(self, checkpoints: Sequence[Path], threads: int) -> None:
+        import torch
+        from ultralytics import YOLO
+
+        torch.set_num_threads(threads)
+        for checkpoint in checkpoints:
+            model = YOLO(str(checkpoint))
+            names = model.names
+            if tuple(names[index] for index in sorted(names)) != ("bread",):
+                raise DataValidationError("ensemble detector must have one bread class")
+            self._models[checkpoint] = model
+
+    def predict(
+        self,
+        *,
+        checkpoint: Path,
+        image_path: Path,
+        confidence_floor: float,
+        nms_iou: float,
+        image_size: int,
+        device: str,
+    ) -> Sequence[Detection]:
+        if device != "cpu":
+            raise DataValidationError("ensemble CPU backend requires device='cpu'")
+        model = self._models.get(checkpoint)
+        if model is None:
+            raise DataValidationError("ensemble CPU backend was not prepared")
+        results = model.predict(
+            source=str(image_path),
+            conf=confidence_floor,
+            iou=nms_iou,
+            imgsz=image_size,
+            device="cpu",
+            verbose=False,
+            stream=False,
+        )
+        if len(results) != 1:
+            raise DataValidationError("ensemble CPU backend returned wrong result count")
+        boxes = results[0].boxes
+        return tuple(
+            Detection(
+                tuple(float(value) for value in xyxy.tolist()),
+                float(confidence),
+                int(class_index),
+            )
+            for xyxy, confidence, class_index in zip(
+                boxes.xyxy.cpu(), boxes.conf.cpu(), boxes.cls.cpu(), strict=True
+            )
+        )
+
+
+def benchmark_detector_ensemble_cpu(
+    config: DetectorEnsembleConfig,
+    backend: DetectorEnsembleCpuBackend | None = None,
+) -> Path:
+    if not isinstance(config, DetectorEnsembleConfig):
+        raise DataValidationError("config must be DetectorEnsembleConfig")
+    selected_backend = backend or UltralyticsEnsembleCpuBackend()
+    if selected_backend.execution_provider() != "torch-cpu":
+        raise DataValidationError("ensemble benchmark requires the torch CPU provider")
+    dataset_root = Path(config.dataset_root).resolve(strict=False)
+    output_dir = Path(config.output_root).resolve(strict=False) / config.run_name
+    benchmark_path = output_dir / "benchmark.json"
+    assert_training_paths_safe([output_dir, benchmark_path], dataset_root)
+    required = tuple(output_dir / name for name in ("metadata.json", "metrics.json"))
+    if not output_dir.is_dir() or any(not path.is_file() for path in required):
+        raise DataValidationError("ensemble evaluation must complete before CPU benchmark")
+    if benchmark_path.exists():
+        raise DataValidationError(f"ensemble benchmark already exists: {benchmark_path}")
+    members = _prepare_members(config)
+    _validate_member_compatibility(members)
+    member_inputs = [_evaluation_inputs(dataset_root, member.yolo_dir) for member in members]
+    images, first_paths = member_inputs[0]
+    if any(item[0] != images for item in member_inputs[1:]):
+        raise DataValidationError("ensemble benchmark truth records do not match")
+    selected_backend.prepare(
+        tuple(member.checkpoint_path for member in members), config.cpu_threads
+    )
+    thresholds = members[0].config.thresholds
+    assert thresholds.max_symmetric_aspect_ratio is not None
+    postprocess = DetectorPostprocessConfig(
+        thresholds.confidence_floor,
+        thresholds.nms_iou,
+        thresholds.max_symmetric_aspect_ratio,
+    )
+
+    def invoke(image_index: int) -> None:
+        image_id = first_paths[image_index].name
+        predictions = []
+        for member, (_records, paths) in zip(members, member_inputs, strict=True):
+            predictions.append(
+                {
+                    image_id: tuple(
+                        selected_backend.predict(
+                            checkpoint=member.checkpoint_path,
+                            image_path=paths[image_index],
+                            confidence_floor=thresholds.confidence_floor,
+                            nms_iou=thresholds.nms_iou,
+                            image_size=member.config.image_size,
+                            device="cpu",
+                        )
+                    )
+                }
+            )
+        merge_member_predictions(predictions, (image_id,), postprocess)
+
+    for _warmup in range(config.cpu_warmups):
+        for image_index in range(len(first_paths)):
+            invoke(image_index)
+    samples = []
+    durations = []
+    for repetition in range(config.cpu_repetitions):
+        for image_index, image_path in enumerate(first_paths):
+            started = time.perf_counter()
+            invoke(image_index)
+            duration_ms = (time.perf_counter() - started) * 1000.0
+            durations.append(duration_ms)
+            samples.append(
+                {
+                    "repetition": repetition,
+                    "image_id": image_path.name,
+                    "duration_ms": duration_ms,
+                }
+            )
+    for index, member in enumerate(members):
+        if _sha256(member.config_path) != member.declared.config_sha256:
+            raise DataValidationError(
+                f"ensemble member {index} config changed during CPU benchmark"
+            )
+        if _sha256(member.checkpoint_path) != member.declared.checkpoint_sha256:
+            raise DataValidationError(
+                f"ensemble member {index} checkpoint changed during CPU benchmark"
+            )
+    payload = {
+        "benchmark_version": 1,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "context": {
+            "device": "cpu",
+            "execution_provider": selected_backend.execution_provider(),
+            "threads": config.cpu_threads,
+            "image_size": members[0].config.image_size,
+            "image_count": len(first_paths),
+            "member_count": len(members),
+            "cpu": platform.processor(),
+            "logical_cpu_count": os.cpu_count(),
+            "environment": _environment_metadata(),
+            "claim": (
+                "Current development-PC CPU measurement only; "
+                "not a specific POS-device claim."
+            ),
+        },
+        "members": [
+            {
+                "order": index,
+                "config_sha256": member.declared.config_sha256,
+                "checkpoint_sha256": member.declared.checkpoint_sha256,
+            }
+            for index, member in enumerate(members)
+        ],
+        "warmup_iterations": config.cpu_warmups,
+        "warmup_invocation_count": config.cpu_warmups * len(first_paths),
+        "repetitions": config.cpu_repetitions,
+        "timing": _timing_statistics(durations),
+        "samples": samples,
+    }
+    temporary = output_dir / f"benchmark.json.tmp-{uuid.uuid4().hex}"
+    try:
+        _write_json(temporary, payload)
+        temporary.replace(benchmark_path)
+    except Exception:
+        temporary.unlink(missing_ok=True)
+        raise
+    return benchmark_path
