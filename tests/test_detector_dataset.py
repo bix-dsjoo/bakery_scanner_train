@@ -205,6 +205,29 @@ def test_build_base_cycle_fold_records_authority_and_exact_assignments(
     } == {"train"}
 
 
+def test_real_sample_allowlist_filters_before_sample_hashing(
+    detector_inputs: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    coco_path = detector_inputs / "base" / "val" / "instances_val.json"
+    original_sha256 = detector_module._sha256
+    touched_excluded: list[Path] = []
+
+    def guarded_sha256(path: Path) -> str:
+        if path.name.startswith("scene_") and path.name.endswith("_0002.jpg"):
+            touched_excluded.append(path)
+            raise AssertionError(f"excluded scene was hashed: {path}")
+        return original_sha256(path)
+
+    monkeypatch.setattr(detector_module, "_sha256", guarded_sha256)
+
+    samples = detector_module._load_real_samples(
+        detector_inputs, coco_path, allowed_scene_ids=frozenset({"0001"})
+    )
+
+    assert {sample.provenance["scene_id"] for sample in samples} == {"0001"}
+    assert touched_excluded == []
+
+
 def test_build_converts_every_annotation_to_bread_and_preserves_category_provenance(
     detector_inputs: Path,
 ) -> None:

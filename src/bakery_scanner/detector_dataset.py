@@ -216,7 +216,12 @@ def _normalized_path_key(path: Path) -> str:
     return os.path.normcase(str(path.resolve(strict=False)))
 
 
-def _load_real_samples(root: Path, coco_path: Path) -> list[_Sample]:
+def _load_real_samples(
+    root: Path,
+    coco_path: Path,
+    *,
+    allowed_scene_ids: frozenset[str] | None = None,
+) -> list[_Sample]:
     registry = load_class_registry(root / "class_registry.json")
     validate_coco(coco_path, registry, expected_phase="base")
     payload = _load_json(coco_path, "real COCO")
@@ -229,12 +234,15 @@ def _load_real_samples(root: Path, coco_path: Path) -> list[_Sample]:
     samples: list[_Sample] = []
     scene_difficulties: dict[str, set[str]] = {}
     for image in images:
-        source_path = (coco_path.parent / image["file_name"]).resolve()
-        source_sha256 = _sha256(source_path)
-        scene_id = scene_id_from_path(source_path)
-        match = SCENE_PATTERN.fullmatch(source_path.name)
+        file_name = image["file_name"]
+        match = SCENE_PATTERN.fullmatch(Path(file_name).name)
         if match is None:
-            raise DataValidationError(f"invalid real scene filename: {source_path.name}")
+            raise DataValidationError(f"invalid real scene filename: {file_name}")
+        scene_id = scene_id_from_path(Path(file_name))
+        if allowed_scene_ids is not None and scene_id not in allowed_scene_ids:
+            continue
+        source_path = (coco_path.parent / file_name).resolve()
+        source_sha256 = _sha256(source_path)
         difficulty = match.group("difficulty")
         group = scene_difficulties.setdefault(scene_id, set())
         if difficulty in group:
@@ -275,6 +283,8 @@ def _load_real_samples(root: Path, coco_path: Path) -> list[_Sample]:
             raise DataValidationError(
                 f"scene {scene_id} must contain exactly e, m, and h images"
             )
+    if allowed_scene_ids is not None and set(scene_difficulties) != set(allowed_scene_ids):
+        raise DataValidationError("real COCO does not contain every allowed scene group")
     return samples
 
 
@@ -735,8 +745,7 @@ def _validate_source_inputs(
     ):
         raise DataValidationError("synthetic manifest sha256 does not match manifest")
 
-    expected = _load_real_samples(root, real_coco_path)
-    expected.extend(_load_synthetic_samples(root, synthetic_run))
+    authority: _BaseCycleAuthority | None = None
     if config.get("assignment_mode") == "base_cycle_fold":
         cycle_run = config.get("cycle_run")
         if not isinstance(cycle_run, str) or not cycle_run:
@@ -752,6 +761,14 @@ def _validate_source_inputs(
             raise DataValidationError("Base cycle manifest path does not match authority")
         if cycle_input.get("sha256") != authority.manifest_sha256:
             raise DataValidationError("Base cycle manifest hash does not match authority")
+    allowed_scene_ids = (
+        frozenset(authority.development_scene_ids) if authority is not None else None
+    )
+    expected = _load_real_samples(
+        root, real_coco_path, allowed_scene_ids=allowed_scene_ids
+    )
+    expected.extend(_load_synthetic_samples(root, synthetic_run))
+    if authority is not None:
         expected = _filter_and_validate_cycle_samples(expected, authority)
     return {sample.key: sample for sample in expected}
 
@@ -1079,13 +1096,20 @@ def build_detector_dataset(
         if not overwrite:
             raise DataValidationError(f"detector run already exists: {output_dir}")
 
-    samples = _load_real_samples(root, real_coco_path)
-    samples.extend(_load_synthetic_samples(root, synthetic_run))
     authority: _BaseCycleAuthority | None = None
     if config.assignment_mode == "base_cycle_fold":
         assert config.cycle_run is not None
         assert config.validation_scene_id is not None
         authority = _load_base_cycle_authority(root, config.cycle_run)
+    allowed_scene_ids = (
+        frozenset(authority.development_scene_ids) if authority is not None else None
+    )
+    samples = _load_real_samples(
+        root, real_coco_path, allowed_scene_ids=allowed_scene_ids
+    )
+    samples.extend(_load_synthetic_samples(root, synthetic_run))
+    if authority is not None:
+        assert config.validation_scene_id is not None
         samples = _filter_and_validate_cycle_samples(samples, authority)
         assignments = _base_cycle_assignments(
             samples, authority.development_scene_ids, config.validation_scene_id
