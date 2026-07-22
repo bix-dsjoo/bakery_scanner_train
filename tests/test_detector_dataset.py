@@ -1,5 +1,6 @@
 import json
 import hashlib
+from types import SimpleNamespace
 from pathlib import Path
 from typing import Callable
 
@@ -92,6 +93,190 @@ def _make_real_images_unique(dataset_root: Path) -> None:
             for y in range(10):
                 changed.putpixel((x, y), (index * 30, index * 20, index * 10))
         changed.save(path)
+
+
+def test_base_cycle_config_requires_cycle_fields() -> None:
+    with pytest.raises(DataValidationError, match="requires cycle_run"):
+        DetectorDatasetConfig(assignment_mode="base_cycle_fold").validate()
+
+    DetectorDatasetConfig(
+        assignment_mode="base_cycle_fold",
+        cycle_run="base_v2",
+        validation_scene_id="0503",
+    ).validate()
+
+
+def test_base_cycle_assignments_use_one_real_group_and_keep_synthetic_train(
+    tmp_path: Path,
+) -> None:
+    samples = []
+    for scene_id in ("0503", "0509"):
+        for difficulty in "emh":
+            samples.append(
+                detector_module._Sample(
+                    key=f"real:{scene_id}:{difficulty}",
+                    origin="real",
+                    source_path=tmp_path / f"scene_{difficulty}_{scene_id}.jpg",
+                    source_sha256=f"sha-{scene_id}-{difficulty}",
+                    width=40,
+                    height=30,
+                    original_annotations=(),
+                    provenance={"scene_id": scene_id},
+                    resources=frozenset({f"real-scene:{scene_id}"}),
+                )
+            )
+    samples.append(
+        detector_module._Sample(
+            key="synthetic:one",
+            origin="synthetic",
+            source_path=tmp_path / "scene_000000.png",
+            source_sha256="sha-synthetic",
+            width=40,
+            height=30,
+            original_annotations=(),
+            provenance={"synthetic_run": "base_v2_s42"},
+            resources=frozenset({"synthetic:one"}),
+        )
+    )
+
+    assignments = detector_module._base_cycle_assignments(
+        samples, ("0503", "0509"), "0503"
+    )
+
+    assert {
+        sample.provenance["scene_id"]
+        for sample in samples
+        if sample.origin == "real" and assignments[sample.key] == "validation"
+    } == {"0503"}
+    assert assignments["synthetic:one"] == "train"
+
+
+def test_build_base_cycle_fold_records_authority_and_exact_assignments(
+    detector_inputs: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _make_real_images_unique(detector_inputs)
+    synthetic_manifest = (
+        detector_inputs / "derived" / "synthetic" / "input" / "manifest.json"
+    )
+    synthetic_payload = _load_json(synthetic_manifest)
+    background_paths = {
+        str((synthetic_manifest.parent / scene["background_path"]).resolve())
+        for scene in synthetic_payload["scenes"]
+    }
+    authority_manifest = detector_inputs / "derived" / "base_cycle" / "unit" / "manifest.json"
+    authority_manifest.parent.mkdir(parents=True)
+    authority_manifest.write_text("{}\n", encoding="utf-8")
+    authority = SimpleNamespace(
+        development_scene_ids=("0001", "0002"),
+        development_backgrounds={path: None for path in background_paths},
+        manifest_path=authority_manifest.resolve(),
+        manifest_sha256=hashlib.sha256(authority_manifest.read_bytes()).hexdigest(),
+        real_coco_path=(detector_inputs / "base/val/instances_val.json").resolve(),
+        real_coco_sha256=hashlib.sha256(
+            (detector_inputs / "base/val/instances_val.json").read_bytes()
+        ).hexdigest(),
+    )
+    monkeypatch.setattr(
+        detector_module,
+        "_load_base_cycle_authority",
+        lambda root, run_name: authority,
+        raising=False,
+    )
+
+    report = build_detector_dataset(
+        detector_inputs,
+        "input",
+        "cycle-fold",
+        DetectorDatasetConfig(
+            seed=42,
+            validation_fraction=0.5,
+            assignment_mode="base_cycle_fold",
+            cycle_run="unit",
+            validation_scene_id="0001",
+        ),
+    )
+
+    manifest = _load_json(report.manifest_path)
+    assert manifest["config"]["assignment_mode"] == "base_cycle_fold"
+    assert manifest["inputs"]["base_cycle"]["sha256"] == authority.manifest_sha256
+    assert {
+        item["provenance"]["scene_id"]
+        for item in manifest["samples"]
+        if item["origin"] == "real" and item["split"] == "validation"
+    } == {"0001"}
+    assert {
+        item["split"] for item in manifest["samples"] if item["origin"] == "synthetic"
+    } == {"train"}
+
+
+def test_build_base_cycle_fold_rejects_coco_outside_frozen_authority(
+    detector_inputs: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    frozen_coco = (detector_inputs / "base/val/instances_val.json").resolve()
+    authority = SimpleNamespace(
+        development_scene_ids=("0001", "0002"),
+        development_backgrounds={},
+        manifest_path=(detector_inputs / "cycle.json").resolve(),
+        manifest_sha256="0" * 64,
+        real_coco_path=frozen_coco,
+        real_coco_sha256=hashlib.sha256(frozen_coco.read_bytes()).hexdigest(),
+    )
+    monkeypatch.setattr(
+        detector_module, "_load_base_cycle_authority", lambda root, run: authority
+    )
+
+    with pytest.raises(DataValidationError, match="frozen Base cycle authority"):
+        build_detector_dataset(
+            detector_inputs,
+            "input",
+            "wrong-coco",
+            DetectorDatasetConfig(
+                assignment_mode="base_cycle_fold",
+                cycle_run="unit",
+                validation_scene_id="0001",
+                real_coco_path="collected/alternate.json",
+            ),
+        )
+
+
+def test_validator_accepts_legacy_builder_manifest(detector_inputs: Path) -> None:
+    report = build_detector_dataset(
+        detector_inputs,
+        "input",
+        "legacy-compatible",
+        DetectorDatasetConfig(seed=19, validation_fraction=1 / 3),
+    )
+    payload = _load_json(report.manifest_path)
+    payload["builder_version"] = "1.0.0"
+    payload["config"].pop("assignment_mode")
+    _write_json(report.manifest_path, payload)
+
+    validated = validate_detector_dataset(detector_inputs, "legacy-compatible")
+
+    assert validated.builder_version == "1.0.0"
+
+
+def test_real_sample_allowlist_filters_before_sample_hashing(
+    detector_inputs: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    coco_path = detector_inputs / "base" / "val" / "instances_val.json"
+    original_sha256 = detector_module._sha256
+    touched_excluded: list[Path] = []
+
+    def guarded_sha256(path: Path) -> str:
+        if path.name.startswith("scene_") and path.name.endswith("_0002.jpg"):
+            touched_excluded.append(path)
+            raise AssertionError(f"excluded scene was hashed: {path}")
+        return original_sha256(path)
+
+    monkeypatch.setattr(detector_module, "_sha256", guarded_sha256)
+
+    samples = detector_module._load_real_samples(
+        detector_inputs, coco_path, allowed_scene_ids=frozenset({"0001"})
+    )
+
+    assert {sample.provenance["scene_id"] for sample in samples} == {"0001"}
+    assert touched_excluded == []
 
 
 def test_build_converts_every_annotation_to_bread_and_preserves_category_provenance(

@@ -60,3 +60,25 @@ def test_training_paths_reject_roots_that_contain_evaluation_data(
 def test_training_paths_reject_empty_configuration(tmp_path: Path) -> None:
     with pytest.raises(DataValidationError, match="at least one"):
         assert_training_paths_safe([], tmp_path / "datasets")
+
+
+def test_safe_training_path_does_not_resolve_evaluation_subtrees(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dataset_root = tmp_path / "datasets"
+    original_resolve = Path.resolve
+    touched: list[Path] = []
+
+    def guarded_resolve(path: Path, strict: bool = False) -> Path:
+        normalized = tuple(part.casefold() for part in path.parts)
+        if normalized[-2:] in {("base", "test"), ("incremental", "test")}:
+            touched.append(path)
+            raise AssertionError(f"evaluation subtree was resolved: {path}")
+        return original_resolve(path, strict=strict)
+
+    monkeypatch.setattr(Path, "resolve", guarded_resolve)
+
+    safe = assert_training_paths_safe([Path("base/val")], dataset_root)
+
+    assert safe == ((dataset_root / "base" / "val").resolve(),)
+    assert touched == []

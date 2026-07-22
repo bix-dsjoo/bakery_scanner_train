@@ -15,6 +15,7 @@ from typing import Any
 
 from PIL import Image, UnidentifiedImageError
 
+from .base_cycle import validate_base_cycle
 from .coco import validate_coco
 from .errors import DataValidationError
 from .registry import load_class_registry
@@ -22,7 +23,8 @@ from .safety import assert_training_paths_safe
 from .splits import SCENE_PATTERN, scene_id_from_path
 from .synthetic import validate_synthetic_dataset
 
-BUILDER_VERSION = "1.0.0"
+LEGACY_BUILDER_VERSION = "1.0.0"
+BUILDER_VERSION = "1.1.0"
 MANIFEST_VERSION = 1
 _RUN_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 _SPLITS = ("train", "validation")
@@ -35,6 +37,9 @@ class DetectorDatasetConfig:
     seed: int = 42
     validation_fraction: float = 0.2
     real_coco_path: str = "base/val/instances_val.json"
+    assignment_mode: str = "origin_fraction"
+    cycle_run: str | None = None
+    validation_scene_id: str | None = None
 
     def validate(self) -> None:
         if isinstance(self.seed, bool) or not isinstance(self.seed, int):
@@ -48,6 +53,16 @@ class DetectorDatasetConfig:
             raise DataValidationError("validation_fraction must be between 0 and 1")
         if not isinstance(self.real_coco_path, str) or not self.real_coco_path:
             raise DataValidationError("real_coco_path must be a non-empty string")
+        if self.assignment_mode not in {"origin_fraction", "base_cycle_fold"}:
+            raise DataValidationError("unsupported detector assignment_mode")
+        cycle_fields = (self.cycle_run, self.validation_scene_id)
+        if self.assignment_mode == "origin_fraction":
+            if any(value is not None for value in cycle_fields):
+                raise DataValidationError("fraction mode must not declare cycle fields")
+        elif not all(isinstance(value, str) and value for value in cycle_fields):
+            raise DataValidationError(
+                "base_cycle_fold requires cycle_run and validation_scene_id"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,6 +124,16 @@ class _Sample:
     resources: frozenset[str]
 
 
+@dataclass(frozen=True, slots=True)
+class _BaseCycleAuthority:
+    development_scene_ids: tuple[str, str]
+    development_backgrounds: dict[str, str | None]
+    manifest_path: Path
+    manifest_sha256: str
+    real_coco_path: Path
+    real_coco_sha256: str
+
+
 def _sha256(path: Path) -> str:
     try:
         return hashlib.sha256(path.read_bytes()).hexdigest()
@@ -124,6 +149,44 @@ def _load_json(path: Path, label: str) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise DataValidationError(f"{label} root must be an object")
     return payload
+
+
+def _load_base_cycle_authority(root: Path, run_name: str) -> _BaseCycleAuthority:
+    report = validate_base_cycle(root.parent, run_name)
+    payload = _load_json(report.manifest_path, "Base cycle manifest")
+    development_ids = tuple(payload["config"]["development_scene_ids"])
+    if len(development_ids) != 2 or not all(
+        isinstance(value, str) and value for value in development_ids
+    ):
+        raise DataValidationError("Base cycle development scene IDs are invalid")
+    backgrounds = {
+        str((root / record["path"]).resolve(strict=False)): record["sha256"]
+        for record in payload["backgrounds"]
+        if record["split"] == "development"
+    }
+    if len(backgrounds) != 2:
+        raise DataValidationError("Base cycle development backgrounds are invalid")
+    return _BaseCycleAuthority(
+        development_scene_ids=(development_ids[0], development_ids[1]),
+        development_backgrounds=backgrounds,
+        manifest_path=report.manifest_path,
+        manifest_sha256=_sha256(report.manifest_path),
+        real_coco_path=(root / payload["real_coco"]["path"]).resolve(strict=False),
+        real_coco_sha256=str(payload["real_coco"]["sha256"]),
+    )
+
+
+def _assert_cycle_real_coco_authorized(
+    real_coco_path: Path, authority: _BaseCycleAuthority
+) -> None:
+    if real_coco_path != authority.real_coco_path:
+        raise DataValidationError(
+            "real COCO path differs from frozen Base cycle authority"
+        )
+    if _sha256(real_coco_path) != authority.real_coco_sha256:
+        raise DataValidationError(
+            "real COCO hash differs from frozen Base cycle authority"
+        )
 
 
 def _manifest_path(path: Path, manifest_dir: Path) -> str:
@@ -171,7 +234,12 @@ def _normalized_path_key(path: Path) -> str:
     return os.path.normcase(str(path.resolve(strict=False)))
 
 
-def _load_real_samples(root: Path, coco_path: Path) -> list[_Sample]:
+def _load_real_samples(
+    root: Path,
+    coco_path: Path,
+    *,
+    allowed_scene_ids: frozenset[str] | None = None,
+) -> list[_Sample]:
     registry = load_class_registry(root / "class_registry.json")
     validate_coco(coco_path, registry, expected_phase="base")
     payload = _load_json(coco_path, "real COCO")
@@ -184,12 +252,15 @@ def _load_real_samples(root: Path, coco_path: Path) -> list[_Sample]:
     samples: list[_Sample] = []
     scene_difficulties: dict[str, set[str]] = {}
     for image in images:
-        source_path = (coco_path.parent / image["file_name"]).resolve()
-        source_sha256 = _sha256(source_path)
-        scene_id = scene_id_from_path(source_path)
-        match = SCENE_PATTERN.fullmatch(source_path.name)
+        file_name = image["file_name"]
+        match = SCENE_PATTERN.fullmatch(Path(file_name).name)
         if match is None:
-            raise DataValidationError(f"invalid real scene filename: {source_path.name}")
+            raise DataValidationError(f"invalid real scene filename: {file_name}")
+        scene_id = scene_id_from_path(Path(file_name))
+        if allowed_scene_ids is not None and scene_id not in allowed_scene_ids:
+            continue
+        source_path = (coco_path.parent / file_name).resolve()
+        source_sha256 = _sha256(source_path)
         difficulty = match.group("difficulty")
         group = scene_difficulties.setdefault(scene_id, set())
         if difficulty in group:
@@ -230,6 +301,8 @@ def _load_real_samples(root: Path, coco_path: Path) -> list[_Sample]:
             raise DataValidationError(
                 f"scene {scene_id} must contain exactly e, m, and h images"
             )
+    if allowed_scene_ids is not None and set(scene_difficulties) != set(allowed_scene_ids):
+        raise DataValidationError("real COCO does not contain every allowed scene group")
     return samples
 
 
@@ -393,6 +466,53 @@ def _split_samples(
     return {
         sample.key: assignments[sample.key] for sample in samples
     }
+
+
+def _base_cycle_assignments(
+    samples: list[_Sample], development_ids: tuple[str, str], validation_id: str
+) -> dict[str, str]:
+    if validation_id not in development_ids:
+        raise DataValidationError("validation scene must be a development scene")
+    assignments: dict[str, str] = {}
+    difficulties: dict[str, set[str]] = {scene_id: set() for scene_id in development_ids}
+    for sample in samples:
+        if sample.origin == "synthetic":
+            assignments[sample.key] = "train"
+            continue
+        scene_id = str(sample.provenance.get("scene_id", ""))
+        if scene_id not in development_ids:
+            raise DataValidationError("detector cycle contains non-development real scene")
+        match = SCENE_PATTERN.fullmatch(sample.source_path.name)
+        if match is None:
+            raise DataValidationError("invalid cycle scene filename")
+        difficulties[scene_id].add(match.group("difficulty"))
+        assignments[sample.key] = "validation" if scene_id == validation_id else "train"
+    if any(values != {"e", "m", "h"} for values in difficulties.values()):
+        raise DataValidationError("each development scene must contain e/m/h exactly once")
+    return assignments
+
+
+def _filter_and_validate_cycle_samples(
+    samples: list[_Sample], authority: _BaseCycleAuthority
+) -> list[_Sample]:
+    selected = [
+        sample
+        for sample in samples
+        if sample.origin == "synthetic"
+        or sample.provenance.get("scene_id") in authority.development_scene_ids
+    ]
+    for sample in selected:
+        if sample.origin != "synthetic":
+            continue
+        background_path = str(Path(str(sample.provenance["background_path"])).resolve())
+        expected_sha = authority.development_backgrounds.get(background_path)
+        if background_path not in authority.development_backgrounds:
+            raise DataValidationError(
+                "synthetic sample uses a non-development Base cycle background"
+            )
+        if expected_sha is not None and sample.provenance.get("background_sha256") != expected_sha:
+            raise DataValidationError("synthetic background hash disagrees with Base cycle")
+    return selected
 
 
 def _output_name(sample: _Sample, synthetic_run: str) -> str:
@@ -643,8 +763,32 @@ def _validate_source_inputs(
     ):
         raise DataValidationError("synthetic manifest sha256 does not match manifest")
 
-    expected = _load_real_samples(root, real_coco_path)
+    authority: _BaseCycleAuthority | None = None
+    if config.get("assignment_mode") == "base_cycle_fold":
+        cycle_run = config.get("cycle_run")
+        if not isinstance(cycle_run, str) or not cycle_run:
+            raise DataValidationError("cycle_run must be a non-empty string")
+        authority = _load_base_cycle_authority(root, cycle_run)
+        _assert_cycle_real_coco_authorized(real_coco_path, authority)
+        cycle_input = _expect_keys(
+            inputs.get("base_cycle"), {"path", "sha256"}, "Base cycle input"
+        )
+        recorded_cycle_path = _resolve_manifest_path(
+            cycle_input.get("path"), output_dir, "Base cycle input path"
+        )
+        if recorded_cycle_path != authority.manifest_path:
+            raise DataValidationError("Base cycle manifest path does not match authority")
+        if cycle_input.get("sha256") != authority.manifest_sha256:
+            raise DataValidationError("Base cycle manifest hash does not match authority")
+    allowed_scene_ids = (
+        frozenset(authority.development_scene_ids) if authority is not None else None
+    )
+    expected = _load_real_samples(
+        root, real_coco_path, allowed_scene_ids=allowed_scene_ids
+    )
     expected.extend(_load_synthetic_samples(root, synthetic_run))
+    if authority is not None:
+        expected = _filter_and_validate_cycle_samples(expected, authority)
     return {sample.key: sample for sample in expected}
 
 
@@ -811,21 +955,31 @@ def _validate_run_dir(root: Path, output_dir: Path) -> DetectorValidationReport:
         raise DataValidationError("detector manifest fields do not match schema")
     if manifest.get("manifest_version") != MANIFEST_VERSION:
         raise DataValidationError("unsupported detector manifest version")
-    if manifest.get("builder_version") != BUILDER_VERSION:
+    builder_version = manifest.get("builder_version")
+    if builder_version not in {LEGACY_BUILDER_VERSION, BUILDER_VERSION}:
         raise DataValidationError("unsupported detector builder version")
-    config = _expect_keys(
-        manifest.get("config"),
-        {"seed", "validation_fraction", "real_coco_path", "synthetic_run"},
-        "detector config",
-    )
-    DetectorDatasetConfig(
+    raw_config = manifest.get("config")
+    if not isinstance(raw_config, dict):
+        raise DataValidationError("detector config must be an object")
+    config_fields = {"seed", "validation_fraction", "real_coco_path", "synthetic_run"}
+    if builder_version == BUILDER_VERSION:
+        config_fields.add("assignment_mode")
+        if raw_config.get("assignment_mode") == "base_cycle_fold":
+            config_fields.update({"cycle_run", "validation_scene_id"})
+    config = _expect_keys(raw_config, config_fields, "detector config")
+    parsed_config = DetectorDatasetConfig(
         seed=config.get("seed"),
         validation_fraction=config.get("validation_fraction"),
         real_coco_path=config.get("real_coco_path"),
-    ).validate()
-    inputs = _expect_keys(
-        manifest.get("inputs"), {"real_coco", "synthetic_manifest"}, "detector inputs"
+        assignment_mode=config.get("assignment_mode", "origin_fraction"),
+        cycle_run=config.get("cycle_run"),
+        validation_scene_id=config.get("validation_scene_id"),
     )
+    parsed_config.validate()
+    input_fields = {"real_coco", "synthetic_manifest"}
+    if parsed_config.assignment_mode == "base_cycle_fold":
+        input_fields.add("base_cycle")
+    inputs = _expect_keys(manifest.get("inputs"), input_fields, "detector inputs")
     samples = _require_list(manifest, "samples", "detector manifest")
     summaries = _expect_keys(manifest.get("splits"), set(_SPLITS), "detector splits")
     for split in _SPLITS:
@@ -868,11 +1022,21 @@ def _validate_run_dir(root: Path, output_dir: Path) -> DetectorValidationReport:
     expected_sources = _validate_source_inputs(root, output_dir, config, inputs)
     if set(sample_ids) != set(expected_sources):
         raise DataValidationError("manifest samples do not match source samples")
-    expected_assignments = _split_samples(
-        list(expected_sources.values()),
-        config["validation_fraction"],
-        config["seed"],
-    )
+    if parsed_config.assignment_mode == "base_cycle_fold":
+        assert parsed_config.cycle_run is not None
+        assert parsed_config.validation_scene_id is not None
+        authority = _load_base_cycle_authority(root, parsed_config.cycle_run)
+        expected_assignments = _base_cycle_assignments(
+            list(expected_sources.values()),
+            authority.development_scene_ids,
+            parsed_config.validation_scene_id,
+        )
+    else:
+        expected_assignments = _split_samples(
+            list(expected_sources.values()),
+            config["validation_fraction"],
+            config["seed"],
+        )
     actual_assignments = {
         sample["sample_id"]: sample["split"] for sample in samples
     }
@@ -927,6 +1091,7 @@ def _validate_run_dir(root: Path, output_dir: Path) -> DetectorValidationReport:
         annotation_count=annotation_total,
         train_image_count=split_counts["train"],
         validation_image_count=split_counts["validation"],
+        builder_version=str(builder_version),
     )
 
 
@@ -951,9 +1116,27 @@ def build_detector_dataset(
         if not overwrite:
             raise DataValidationError(f"detector run already exists: {output_dir}")
 
-    samples = _load_real_samples(root, real_coco_path)
+    authority: _BaseCycleAuthority | None = None
+    if config.assignment_mode == "base_cycle_fold":
+        assert config.cycle_run is not None
+        assert config.validation_scene_id is not None
+        authority = _load_base_cycle_authority(root, config.cycle_run)
+        _assert_cycle_real_coco_authorized(real_coco_path, authority)
+    allowed_scene_ids = (
+        frozenset(authority.development_scene_ids) if authority is not None else None
+    )
+    samples = _load_real_samples(
+        root, real_coco_path, allowed_scene_ids=allowed_scene_ids
+    )
     samples.extend(_load_synthetic_samples(root, synthetic_run))
-    assignments = _split_samples(samples, config.validation_fraction, config.seed)
+    if authority is not None:
+        assert config.validation_scene_id is not None
+        samples = _filter_and_validate_cycle_samples(samples, authority)
+        assignments = _base_cycle_assignments(
+            samples, authority.development_scene_ids, config.validation_scene_id
+        )
+    else:
+        assignments = _split_samples(samples, config.validation_fraction, config.seed)
 
     detector_root = output_dir.parent
     detector_root.mkdir(parents=True, exist_ok=True)
@@ -971,25 +1154,39 @@ def build_detector_dataset(
             summaries[split] = summary
         manifest_samples.sort(key=lambda item: item["sample_id"])
         synthetic_manifest = root / "derived" / "synthetic" / synthetic_run / "manifest.json"
+        manifest_config: dict[str, Any] = {
+            "seed": config.seed,
+            "validation_fraction": config.validation_fraction,
+            "real_coco_path": _manifest_path(real_coco_path, staging_dir),
+            "synthetic_run": synthetic_run,
+            "assignment_mode": config.assignment_mode,
+        }
+        manifest_inputs: dict[str, Any] = {
+            "real_coco": {
+                "path": _manifest_path(real_coco_path, staging_dir),
+                "sha256": _sha256(real_coco_path),
+            },
+            "synthetic_manifest": {
+                "path": _manifest_path(synthetic_manifest, staging_dir),
+                "sha256": _sha256(synthetic_manifest),
+            },
+        }
+        if authority is not None:
+            manifest_config.update(
+                {
+                    "cycle_run": config.cycle_run,
+                    "validation_scene_id": config.validation_scene_id,
+                }
+            )
+            manifest_inputs["base_cycle"] = {
+                "path": _manifest_path(authority.manifest_path, staging_dir),
+                "sha256": authority.manifest_sha256,
+            }
         manifest = {
             "manifest_version": MANIFEST_VERSION,
             "builder_version": BUILDER_VERSION,
-            "config": {
-                "seed": config.seed,
-                "validation_fraction": config.validation_fraction,
-                "real_coco_path": _manifest_path(real_coco_path, staging_dir),
-                "synthetic_run": synthetic_run,
-            },
-            "inputs": {
-                "real_coco": {
-                    "path": _manifest_path(real_coco_path, staging_dir),
-                    "sha256": _sha256(real_coco_path),
-                },
-                "synthetic_manifest": {
-                    "path": _manifest_path(synthetic_manifest, staging_dir),
-                    "sha256": _sha256(synthetic_manifest),
-                },
-            },
+            "config": manifest_config,
+            "inputs": manifest_inputs,
             "splits": summaries,
             "samples": manifest_samples,
         }
