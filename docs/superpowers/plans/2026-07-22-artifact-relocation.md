@@ -4,7 +4,7 @@
 
 **Goal:** Preserve every existing artifact byte and SHA-256 while allowing provenance validation after the artifact tree moves from `.worktrees/<name>/` to the repository root.
 
-**Architecture:** Add one pure path-identity helper that accepts only an exact path or the same repository-relative artifact path with one `.worktrees/<name>` segment removed. Integrate it only where stored provenance paths are already paired with SHA-256 validation; keep current runtime config/output/checkpoint selection strict.
+**Architecture:** Add one pure path-identity helper that accepts only an exact path or the same repository-relative artifact path with one `.worktrees/<name>` segment removed. Integrate it where stored provenance paths are paired with SHA-256 validation. For the hashless operational `YOLO data.yaml.path`, apply it only after the source manifest, every image/label hash, inventory and remaining YAML layout fields pass strict validation. Keep current runtime config/output/checkpoint selection strict.
 
 **Tech Stack:** Python 3.11, `pathlib`, pytest 9, existing `DataValidationError` contracts, Git worktrees.
 
@@ -12,7 +12,7 @@
 
 - Do not modify original images, COCO JSON, `datasets/class_registry.json`, any derived manifest, run metadata, checkpoint, frozen config, one-shot lock, metric or prediction artifact.
 - Do not read or use Base/Incremental test data for implementation or model selection.
-- Relocation is valid only for the exact repository-relative path under `datasets`, `runs`, `configs` or `models` and only when the caller's existing SHA-256 check also passes.
+- Relocation is valid only for the exact repository-relative path under `datasets`, `runs`, `configs` or `models`. Existing SHA-256 checks must pass; the sole hashless exception is operational `YOLO data.yaml.path`, after complete hash-bound YOLO run validation and exact remaining YAML fields pass.
 - Reject project-root escape, traversal segments, another repository name, missing worktree name, extra path segments and a different artifact filename.
 - Keep runtime-selected config, dataset root, output and checkpoint paths strict; only stored historical provenance paths become relocation-aware.
 - Work only on `codex/fix-artifact-relocation`, obtain independent Ready-PR review, squash merge with a Korean title and remove the remote branch.
@@ -443,6 +443,19 @@ relocated path remains hash-bound. If the diff changes, rerun affected tests and
 request a fresh exact-head review. A separate merge agent verifies current
 `main`, unresolved conversations, CI/review evidence, then squash-merges and
 deletes the remote branch.
+
+---
+
+### Task 4A: Post-merge YOLO operational root correction
+
+- [x] **Step 1: Reproduce root `data.yaml` relocation failure**
+- [x] **Step 2: Add positive relocation and foreign-repository rejection tests**
+- [x] **Step 3: Make only `data.yaml.path` relocation-aware after full YOLO run validation**
+- [x] **Step 4: Keep `train`, `val`, `names`, source manifest and sample hashes strict**
+- [x] **Step 5: Run targeted tests, full pytest, compileall and diff-check**
+
+This correction preserves the copied `data.yaml` bytes and records the operational-path
+exception explicitly instead of treating it as hash-bound provenance.
 
 ---
 

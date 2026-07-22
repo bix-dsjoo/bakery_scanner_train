@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 
 import pytest
+import yaml
 
 from bakery_scanner.errors import DataValidationError
 from bakery_scanner.yolo_dataset import build_yolo_dataset, validate_yolo_dataset
@@ -140,6 +141,53 @@ def test_validate_yolo_dataset_accepts_same_hashed_relocated_source(
     validated = validate_yolo_dataset(dataset_root, "relocated")
 
     assert validated.output_dir == report.output_dir
+
+
+def test_validate_yolo_dataset_accepts_relocated_data_root(
+    detector_source_run: tuple[Path, str],
+) -> None:
+    dataset_root, source_run = detector_source_run
+    report = build_yolo_dataset(dataset_root, source_run, "relocated-data-root")
+    data_path = report.output_dir / "data.yaml"
+    data = yaml.safe_load(data_path.read_text(encoding="utf-8"))
+    data["path"] = str(
+        dataset_root.parent
+        / ".worktrees"
+        / "old"
+        / report.output_dir.relative_to(dataset_root.parent)
+    )
+    data_path.write_text(
+        yaml.safe_dump(data, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+
+    validated = validate_yolo_dataset(dataset_root, "relocated-data-root")
+
+    assert validated.output_dir == report.output_dir
+
+
+def test_validate_yolo_dataset_rejects_data_root_from_other_repository(
+    detector_source_run: tuple[Path, str],
+) -> None:
+    dataset_root, source_run = detector_source_run
+    report = build_yolo_dataset(dataset_root, source_run, "foreign-data-root")
+    data_path = report.output_dir / "data.yaml"
+    data = yaml.safe_load(data_path.read_text(encoding="utf-8"))
+    data["path"] = str(
+        dataset_root.parent.parent
+        / "unrelated"
+        / dataset_root.parent.name
+        / ".worktrees"
+        / "old"
+        / report.output_dir.relative_to(dataset_root.parent)
+    )
+    data_path.write_text(
+        yaml.safe_dump(data, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(DataValidationError, match="data.yaml disagrees"):
+        validate_yolo_dataset(dataset_root, "foreign-data-root")
 
 
 def test_failed_publish_restores_existing_yolo_run(
