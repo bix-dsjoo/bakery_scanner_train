@@ -29,6 +29,7 @@ from bakery_scanner.final_evaluation import (
     _metrics,
     _strict_validate_classifier_checkpoint,
     _update_start_lock,
+    _validate_classifier_metadata,
     load_final_evaluation_config,
     preflight_final_evaluation,
     run_final_evaluation,
@@ -37,6 +38,140 @@ from bakery_scanner.final_evaluation import (
 
 def _sha(content: bytes) -> str:
     return hashlib.sha256(content).hexdigest()
+
+
+def _relocated_final_classifier_fixture(tmp_path: Path):
+    project_root = tmp_path / "bakery_scanner_train"
+    manifest = project_root / "datasets" / "derived" / "classifier" / "manifest.json"
+    checkpoint = (
+        project_root
+        / "runs"
+        / "classifier"
+        / "incremental"
+        / "checkpoints"
+        / "best.pt"
+    )
+    detector_checkpoint = (
+        project_root / "runs" / "detector" / "base" / "checkpoints" / "best.pt"
+    )
+    for path, content in (
+        (manifest, b"manifest"),
+        (checkpoint, b"classifier"),
+        (detector_checkpoint, b"detector"),
+    ):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+    old_root = project_root / ".worktrees" / "classifier-foundation"
+    context = {"registry_sha256": "a" * 64, "model_index_mapping": {"bread": 0}}
+    metadata = {
+        "dataset": {
+            "phase": "incremental",
+            "output_dimension": 20,
+            "manifest_path": str(old_root / manifest.relative_to(project_root)),
+            "manifest_sha256": hashlib.sha256(manifest.read_bytes()).hexdigest(),
+            **context,
+        },
+        "model": {"architecture": "resnet18"},
+        "frozen_detector": {
+            "checkpoint": str(
+                old_root / detector_checkpoint.relative_to(project_root)
+            ),
+            "sha256_before": hashlib.sha256(
+                detector_checkpoint.read_bytes()
+            ).hexdigest(),
+            "sha256_after": hashlib.sha256(
+                detector_checkpoint.read_bytes()
+            ).hexdigest(),
+            "detector_unchanged": True,
+        },
+    }
+    selected_config = SimpleNamespace(
+        output_root=project_root / "runs" / "classifier",
+        run_name="incremental",
+    )
+    frozen = FrozenClassifierConfig(
+        "configs/incremental.yaml",
+        "b" * 64,
+        str(checkpoint),
+        hashlib.sha256(checkpoint.read_bytes()).hexdigest(),
+        20,
+        224,
+    )
+    report = SimpleNamespace(
+        phase="incremental",
+        output_dimension=20,
+        manifest_path=manifest,
+    )
+    return (
+        project_root,
+        checkpoint,
+        detector_checkpoint,
+        context,
+        metadata,
+        selected_config,
+        frozen,
+        report,
+    )
+
+
+def test_final_classifier_metadata_accepts_relocated_hashed_paths(
+    tmp_path: Path,
+) -> None:
+    (
+        project_root,
+        checkpoint,
+        detector_checkpoint,
+        context,
+        metadata,
+        selected_config,
+        frozen,
+        report,
+    ) = _relocated_final_classifier_fixture(tmp_path)
+
+    _validate_classifier_metadata(
+        name="incremental",
+        selected_config=selected_config,
+        frozen=frozen,
+        checkpoint=checkpoint,
+        metadata=metadata,
+        report=report,
+        context=context,
+        detector_checkpoint=detector_checkpoint,
+        detector_hash=hashlib.sha256(detector_checkpoint.read_bytes()).hexdigest(),
+        project_root=project_root,
+    )
+
+
+def test_final_classifier_metadata_rejects_relocated_manifest_hash_drift(
+    tmp_path: Path,
+) -> None:
+    (
+        project_root,
+        checkpoint,
+        detector_checkpoint,
+        context,
+        metadata,
+        selected_config,
+        frozen,
+        report,
+    ) = _relocated_final_classifier_fixture(tmp_path)
+    metadata["dataset"]["manifest_sha256"] = "0" * 64
+
+    with pytest.raises(DataValidationError, match="classifier metadata"):
+        _validate_classifier_metadata(
+            name="incremental",
+            selected_config=selected_config,
+            frozen=frozen,
+            checkpoint=checkpoint,
+            metadata=metadata,
+            report=report,
+            context=context,
+            detector_checkpoint=detector_checkpoint,
+            detector_hash=hashlib.sha256(
+                detector_checkpoint.read_bytes()
+            ).hexdigest(),
+            project_root=project_root,
+        )
 
 
 def _payload() -> dict[str, object]:
@@ -321,11 +456,11 @@ def test_actual_preflight_never_touches_test_paths(tmp_path: Path, monkeypatch) 
     )
     monkeypatch.setattr(
         "bakery_scanner.e2e_inference._validate_yolo_source_binding",
-        lambda *_args: None,
+        lambda *_args, **_kwargs: None,
     )
     monkeypatch.setattr(
         "bakery_scanner.e2e_inference._validate_detector_checkpoint_provenance",
-        lambda *_args: None,
+        lambda *_args, **_kwargs: None,
     )
     monkeypatch.setattr(
         "bakery_scanner.e2e_inference._checkpoint_metadata",

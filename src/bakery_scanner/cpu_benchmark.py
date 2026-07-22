@@ -19,6 +19,7 @@ from typing import Any, Callable, Protocol, Sequence
 
 import yaml
 
+from .artifact_paths import recorded_artifact_path_matches
 from .errors import DataValidationError
 from .safety import assert_training_paths_safe
 
@@ -304,6 +305,7 @@ def _validate_classifier_checkpoint_provenance(
     classifier_manifest_path: Path,
     classifier_context: Mapping[str, Any],
     detector_checkpoint: Path,
+    project_root: Path,
 ) -> None:
     expected_checkpoint = (
         Path(config.output_root) / config.run_name / "checkpoints" / "best.pt"
@@ -319,7 +321,11 @@ def _validate_classifier_checkpoint_provenance(
         not isinstance(dataset, dict)
         or dataset.get("phase") != "incremental"
         or dataset.get("output_dimension") != 20
-        or dataset.get("manifest_path") != str(classifier_manifest_path)
+        or not recorded_artifact_path_matches(
+            dataset.get("manifest_path"),
+            classifier_manifest_path,
+            project_root=project_root,
+        )
         or dataset.get("manifest_sha256") != _sha256(classifier_manifest_path)
         or dataset.get("registry_sha256") != classifier_context.get("registry_sha256")
         or dataset.get("model_index_mapping")
@@ -333,8 +339,11 @@ def _validate_classifier_checkpoint_provenance(
     detector_hash = _sha256(detector_checkpoint)
     if (
         not isinstance(frozen_detector, dict)
-        or Path(str(frozen_detector.get("checkpoint"))).resolve(strict=False)
-        != detector_checkpoint
+        or not recorded_artifact_path_matches(
+            frozen_detector.get("checkpoint"),
+            detector_checkpoint,
+            project_root=project_root,
+        )
         or frozen_detector.get("sha256_before") != detector_hash
         or frozen_detector.get("sha256_after") != detector_hash
         or frozen_detector.get("detector_unchanged") is not True
@@ -399,6 +408,7 @@ def _prepare_cpu_benchmark(config: CpuBenchmarkConfig) -> PreparedCpuBenchmark:
         yolo_report.manifest_path,
         detector_config.source_detector_run,
         detector_report.manifest_path,
+        project_root=dataset_root.parent,
     )
     classifier_report = validate_classifier_dataset(
         dataset_root, classifier_config.source_classifier_run
@@ -427,6 +437,7 @@ def _prepare_cpu_benchmark(config: CpuBenchmarkConfig) -> PreparedCpuBenchmark:
         detector_checkpoint,
         detector_metadata,
         yolo_report.manifest_path,
+        project_root=dataset_root.parent,
     )
     classifier_metadata_path, classifier_metadata = _checkpoint_metadata(
         classifier_checkpoint, "classifier"
@@ -438,6 +449,7 @@ def _prepare_cpu_benchmark(config: CpuBenchmarkConfig) -> PreparedCpuBenchmark:
         classifier_manifest_path=classifier_report.manifest_path,
         classifier_context=classifier_context,
         detector_checkpoint=detector_checkpoint,
+        project_root=dataset_root.parent,
     )
     return PreparedCpuBenchmark(
         dataset_root=dataset_root,

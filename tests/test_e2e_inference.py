@@ -195,6 +195,7 @@ def test_detector_checkpoint_provenance_rejects_different_run_config(
             checkpoint,
             metadata,
             Path(metadata["dataset"]["manifest_path"]),
+            project_root=tmp_path,
         )
 
 
@@ -222,6 +223,7 @@ def test_detector_checkpoint_provenance_rejects_backend_argument_drift(
             checkpoint,
             metadata,
             Path(metadata["dataset"]["manifest_path"]),
+            project_root=tmp_path,
         )
 
 
@@ -249,6 +251,7 @@ def test_detector_checkpoint_provenance_rejects_manifest_hash_drift(
             checkpoint,
             metadata,
             Path(metadata["dataset"]["manifest_path"]),
+            project_root=tmp_path,
         )
 
 
@@ -276,6 +279,119 @@ def test_detector_checkpoint_provenance_rejects_pretrained_model_drift(
             checkpoint,
             metadata,
             Path(metadata["dataset"]["manifest_path"]),
+            project_root=tmp_path,
+        )
+
+
+def test_detector_checkpoint_provenance_accepts_relocated_manifest_path(
+    tmp_path: Path,
+) -> None:
+    project_root = tmp_path / "bakery_scanner_train"
+    project_root.mkdir()
+    dataset_root = project_root / "datasets"
+    detector_config, _ = _source_configs(dataset_root, project_root)
+    checkpoint, metadata_path = _checkpoint(
+        project_root
+        / "runs"
+        / "detector"
+        / "detector"
+        / "checkpoints"
+        / "best.pt",
+        b"detector",
+    )
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    yolo_manifest = Path(metadata["dataset"]["manifest_path"])
+    metadata["dataset"]["manifest_path"] = str(
+        project_root
+        / ".worktrees"
+        / "old"
+        / yolo_manifest.relative_to(project_root)
+    )
+
+    _validate_detector_checkpoint_provenance(
+        detector_config,
+        detector_config,
+        checkpoint,
+        metadata,
+        yolo_manifest,
+        project_root=project_root,
+    )
+
+
+def test_yolo_source_binding_accepts_relocated_manifest_path(tmp_path: Path) -> None:
+    project_root = tmp_path / "bakery_scanner_train"
+    detector_manifest = (
+        project_root / "datasets" / "derived" / "detector" / "manifest.json"
+    )
+    detector_manifest.parent.mkdir(parents=True)
+    detector_manifest.write_text('{"samples": []}\n', encoding="utf-8")
+    yolo_manifest = (
+        project_root / "datasets" / "derived" / "yolo" / "manifest.json"
+    )
+    yolo_manifest.parent.mkdir(parents=True)
+    yolo_manifest.write_text(
+        json.dumps(
+            {
+                "source": {
+                    "run_name": "selected-detector-run",
+                    "manifest_path": str(
+                        project_root
+                        / ".worktrees"
+                        / "old"
+                        / detector_manifest.relative_to(project_root)
+                    ),
+                    "manifest_sha256": _sha256(detector_manifest),
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    _validate_yolo_source_binding(
+        yolo_manifest,
+        "selected-detector-run",
+        detector_manifest,
+        project_root=project_root,
+    )
+
+
+def test_yolo_source_binding_rejects_relocated_manifest_hash_drift(
+    tmp_path: Path,
+) -> None:
+    project_root = tmp_path / "bakery_scanner_train"
+    detector_manifest = (
+        project_root / "datasets" / "derived" / "detector" / "manifest.json"
+    )
+    detector_manifest.parent.mkdir(parents=True)
+    detector_manifest.write_text('{"samples": []}\n', encoding="utf-8")
+    yolo_manifest = (
+        project_root / "datasets" / "derived" / "yolo" / "manifest.json"
+    )
+    yolo_manifest.parent.mkdir(parents=True)
+    yolo_manifest.write_text(
+        json.dumps(
+            {
+                "source": {
+                    "run_name": "selected-detector-run",
+                    "manifest_path": str(
+                        project_root
+                        / ".worktrees"
+                        / "old"
+                        / detector_manifest.relative_to(project_root)
+                    ),
+                    "manifest_sha256": "0" * 64,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(DataValidationError, match="YOLO source"):
+        _validate_yolo_source_binding(
+            yolo_manifest,
+            "selected-detector-run",
+            detector_manifest,
+            project_root=project_root,
         )
 
 
@@ -303,6 +419,7 @@ def test_yolo_source_binding_rejects_different_detector_run(tmp_path: Path) -> N
             yolo_manifest,
             "selected-detector-run",
             detector_manifest,
+            project_root=tmp_path,
         )
 
 
@@ -414,7 +531,7 @@ def test_e2e_publishes_metrics_and_preserves_detector_checkpoint(
     )
     monkeypatch.setattr(
         "bakery_scanner.e2e_inference._validate_yolo_source_binding",
-        lambda *args: None,
+        lambda *args, **kwargs: None,
     )
     monkeypatch.setattr(
         "bakery_scanner.e2e_inference.validate_classifier_dataset",
@@ -495,7 +612,7 @@ def test_e2e_accepts_empty_detections_and_cleans_failed_run(
     )
     monkeypatch.setattr(
         "bakery_scanner.e2e_inference._validate_yolo_source_binding",
-        lambda *args: None,
+        lambda *args, **kwargs: None,
     )
     monkeypatch.setattr(
         "bakery_scanner.e2e_inference.validate_classifier_dataset",
@@ -558,7 +675,7 @@ def test_e2e_rejects_invalid_classifier_batch_accounting(
     )
     monkeypatch.setattr(
         "bakery_scanner.e2e_inference._validate_yolo_source_binding",
-        lambda *args: None,
+        lambda *args, **kwargs: None,
     )
     monkeypatch.setattr(
         "bakery_scanner.e2e_inference.validate_classifier_dataset",

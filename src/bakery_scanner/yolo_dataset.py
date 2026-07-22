@@ -14,6 +14,7 @@ from typing import Any
 import yaml
 from PIL import Image, UnidentifiedImageError
 
+from .artifact_paths import recorded_artifact_path_matches
 from .detector_dataset import validate_detector_dataset
 from .errors import DataValidationError
 from .safety import assert_training_paths_safe
@@ -190,8 +191,11 @@ def _validate_run_dir(
         raise DataValidationError("YOLO source run_name must be non-empty")
     source_report = validate_detector_dataset(dataset_root, source["run_name"])
     assert_training_paths_safe([source_report.output_dir], dataset_root)
-    recorded_source_path = Path(source["manifest_path"]).resolve(strict=False)
-    if recorded_source_path != source_report.manifest_path.resolve(strict=False):
+    if not recorded_artifact_path_matches(
+        source["manifest_path"],
+        source_report.manifest_path,
+        project_root=dataset_root.parent,
+    ):
         raise DataValidationError("YOLO source manifest path changed")
     if source["manifest_sha256"] != _sha256(source_report.manifest_path):
         raise DataValidationError("YOLO source manifest hash changed")

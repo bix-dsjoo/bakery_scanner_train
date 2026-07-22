@@ -118,6 +118,30 @@ def test_validate_yolo_dataset_rejects_changed_source_manifest(
         validate_yolo_dataset(dataset_root, "changed-source")
 
 
+def test_validate_yolo_dataset_accepts_same_hashed_relocated_source(
+    detector_source_run: tuple[Path, str],
+) -> None:
+    dataset_root, source_run = detector_source_run
+    report = build_yolo_dataset(dataset_root, source_run, "relocated")
+    manifest = json.loads(report.manifest_path.read_text(encoding="utf-8"))
+    source_manifest = (
+        dataset_root / "derived" / "detector" / source_run / "manifest.json"
+    )
+    manifest["source"]["manifest_path"] = str(
+        dataset_root.parent
+        / ".worktrees"
+        / "old"
+        / source_manifest.relative_to(dataset_root.parent)
+    )
+    report.manifest_path.write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+
+    validated = validate_yolo_dataset(dataset_root, "relocated")
+
+    assert validated.output_dir == report.output_dir
+
+
 def test_failed_publish_restores_existing_yolo_run(
     detector_source_run: tuple[Path, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:

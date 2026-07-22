@@ -352,6 +352,14 @@ bakery-detector evaluate `
 
 두 subcommand 모두 `--json`을 지원합니다. 이 결과는 3장의 실제 validation 장면에 대한 최초 재현 가능한 train-side 기준선이며 test 성능이나 특정 POS 장치의 성능을 의미하지 않습니다. Test 평가는 기준 설정을 고정한 뒤 별도 단계에서만 수행합니다.
 
+### Artifact 경로 이동
+
+동일 저장소의 `.worktrees/<name>/`에서 루트로 artifact를 이동한 경우 검증기는
+`datasets`, `runs`, `configs`, `models` 이하의 동일 상대경로와 기존 SHA-256이
+모두 일치할 때만 같은 provenance로 인정합니다. Manifest, metadata와 checkpoint는
+경로 이동을 위해 다시 쓰지 않습니다. 다른 저장소, 다른 상대경로, 경로 traversal,
+누락된 worktree 이름 또는 SHA-256 불일치는 오류로 처리합니다.
+
 ## Classifier 학습 데이터 조립과 검증
 
 `bakery-classifier-data`는 레지스트리에 등록된 단일 객체 이미지와
