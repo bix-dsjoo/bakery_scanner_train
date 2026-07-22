@@ -427,3 +427,49 @@ def test_cpu_benchmark_rejects_checkpoint_mutation(
         )
 
     assert not (Path(config.output_root) / config.run_name / "benchmark.json").exists()
+
+
+def test_repository_ensemble_configs_are_frozen_and_loadable() -> None:
+    root = Path(__file__).resolve().parents[1]
+    expected = {
+        "0503": (
+            (
+                "f176a807c2e10332af41eb9aeab44229a94d66b31a5374165230ec3b29b395d9",
+                "370986e06f6bd9b60bc389937e6f74b986d54f1ef2235c8728817a466dcead92",
+            ),
+            (
+                "62a0a86548e483f92e197d92d52a1bbe395f847ace1c1d4025b704277c03ef2b",
+                "3c611b1124e7de9e7bd5ac7141a3e155f4ae45e1e3d1c57ee426ff5dcef9f7f6",
+            ),
+        ),
+        "0509": (
+            (
+                "9960b18cc607c6dc55dfc0b4cf6722571bbe0b28395fab972ff98d5c85255ccc",
+                "b11b56600f6920e9015c31d0fe48af91f7773369cecb3d8c15d3338409b880f6",
+            ),
+            (
+                "9d584b7a0f8011deb130240a0b2787c79e153fe8b0c6a0ad2147efaf7d5d1f75",
+                "b97feb4fa0a5df6798ccff90e39f5e79a9478b263b7a2bfcdd9fb533db4acb85",
+            ),
+        ),
+    }
+    for fold, hashes in expected.items():
+        config = load_detector_ensemble_config(
+            root
+            / "configs"
+            / "detector_ensemble"
+            / f"yolo26s_s42_s44_val{fold}.yaml"
+        )
+        assert [
+            (member.config_sha256, member.checkpoint_sha256)
+            for member in config.members
+        ] == list(hashes)
+        assert ["s42" in config.members[0].config_path, "s44" in config.members[1].config_path] == [
+            True,
+            True,
+        ]
+        assert (config.cpu_threads, config.cpu_warmups, config.cpu_repetitions) == (
+            8,
+            1,
+            3,
+        )
