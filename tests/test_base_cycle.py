@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
+import subprocess
 from dataclasses import replace
 from pathlib import Path
 
@@ -11,8 +13,10 @@ from PIL import Image
 
 from bakery_scanner.base_cycle import (
     _CONFIG_FIELDS,
+    _assert_existing_components_are_physical,
     _assignment_lock,
     _prepare_inventory,
+    _publish_assignment_lock,
     _validate_config_paths_lexically,
     load_base_cycle_config,
 )
@@ -131,15 +135,7 @@ def cycle_fixture(tmp_path: Path) -> tuple[Path, Path]:
 
 def _publish_assignment_lock_for_test(config_path: Path) -> Path:
     config = load_base_cycle_config(config_path)
-    repository = config_path.parents[2]
-    run_dir = repository / config.dataset_root / config.output_root / config.run_name
-    run_dir.mkdir(parents=True)
-    lock_path = run_dir / "assignment.lock.json"
-    lock_path.write_text(
-        json.dumps(_assignment_lock(config), ensure_ascii=False, sort_keys=True),
-        encoding="utf-8",
-    )
-    return lock_path
+    return _publish_assignment_lock(config_path, config)
 
 
 def _inject_coco_image_filename(dataset_root: Path, file_name: str) -> None:
@@ -180,6 +176,14 @@ def test_load_base_cycle_config_accepts_exact_schema(cycle_fixture) -> None:
             {"holdout_background": "collected/backgrounds/tray_white_square.png"},
             "backgrounds",
         ),
+        (
+            {
+                "holdout_background": (
+                    "collected/backgrounds/./tray_white_square.png"
+                )
+            },
+            "backgrounds",
+        ),
         ({"seeds": [42, 42, 44]}, "seeds"),
         ({"seeds": [42, -1, 44]}, "seeds"),
     ],
@@ -204,6 +208,25 @@ def test_load_base_cycle_config_rejects_unknown_field(cycle_fixture) -> None:
 
     with pytest.raises(DataValidationError, match="fields"):
         load_base_cycle_config(config_path)
+
+
+def test_load_base_cycle_config_normalizes_paths_before_semantic_hash(
+    cycle_fixture,
+) -> None:
+    _, config_path = cycle_fixture
+    original = load_base_cycle_config(config_path)
+    payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    payload["development_backgrounds"][0] = (
+        "collected/backgrounds/./tray_white_square.png"
+    )
+    config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+
+    normalized = load_base_cycle_config(config_path)
+
+    assert normalized == original
+    assert _assignment_lock(normalized)["config_sha256"] == _assignment_lock(original)[
+        "config_sha256"
+    ]
 
 
 @pytest.mark.parametrize("missing", sorted(_CONFIG_FIELDS))
@@ -269,6 +292,46 @@ def test_config_path_under_test_is_rejected_before_filesystem_access(
     assert touched == []
 
 
+def test_physical_component_check_rejects_link_without_stat_or_resolve(
+    cycle_fixture, monkeypatch
+) -> None:
+    dataset_root, config_path = cycle_fixture
+    target = dataset_root / "base" / "test"
+    target.mkdir(parents=True)
+    (target / "forbidden.yaml").write_text("forbidden\n", encoding="utf-8")
+    safe_link = config_path.parent / "linked"
+    if os.name == "nt":
+        subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(safe_link), str(target)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    else:
+        safe_link.symlink_to(target, target_is_directory=True)
+
+    touched: list[str] = []
+    original_stat = Path.stat
+
+    def forbidden_stat(path: Path, *args, **kwargs):
+        if kwargs.get("follow_symlinks") is False:
+            return original_stat(path, *args, **kwargs)
+        touched.append("stat")
+        raise AssertionError("physical check must not follow the link target")
+
+    def forbidden_resolve(*_args, **_kwargs):
+        touched.append("resolve")
+        raise AssertionError("physical check must not resolve the link target")
+
+    with monkeypatch.context() as guard:
+        guard.setattr(Path, "stat", forbidden_stat)
+        guard.setattr(Path, "resolve", forbidden_resolve)
+        with pytest.raises(DataValidationError, match="symlink|junction"):
+            _assert_existing_components_are_physical(safe_link)
+
+    assert touched == []
+
+
 def test_configured_test_path_is_rejected_before_any_filesystem_access(
     cycle_fixture, monkeypatch
 ) -> None:
@@ -290,6 +353,22 @@ def test_configured_test_path_is_rejected_before_any_filesystem_access(
     with pytest.raises(DataValidationError, match="evaluation-only"):
         _validate_config_paths_lexically(config)
     assert touched == []
+
+
+def test_prepare_inventory_rejects_valid_lock_outside_cycle_direct_child(
+    cycle_fixture, tmp_path
+) -> None:
+    _, config_path = cycle_fixture
+    config = load_base_cycle_config(config_path)
+    unrelated = tmp_path / "unrelated" / config.run_name / "assignment.lock.json"
+    unrelated.parent.mkdir(parents=True)
+    unrelated.write_text(
+        json.dumps(_assignment_lock(config), ensure_ascii=False, sort_keys=True),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(DataValidationError, match="direct child"):
+        _prepare_inventory(config_path, config, unrelated)
 
 
 def test_coco_image_test_path_is_rejected_before_image_filesystem_access(

@@ -6,6 +6,7 @@ import os
 import posixpath
 import re
 import shutil
+import stat
 import uuid
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
@@ -115,6 +116,20 @@ def _seed_tuple(value: object) -> tuple[int, int, int]:
     return value[0], value[1], value[2]
 
 
+def _normalized_configured_path(value: object, label: str) -> str:
+    return posixpath.normpath(_text(value, label).replace("\\", "/"))
+
+
+def _normalized_path_tuple(
+    value: object, length: int, label: str
+) -> tuple[str, ...]:
+    parsed = _text_tuple(value, length, label)
+    normalized = tuple(_normalized_configured_path(item, label) for item in parsed)
+    if len(set(normalized)) != len(normalized):
+        raise DataValidationError(f"{label} must be unique after path normalization")
+    return normalized
+
+
 def _normalized_contract_root(value: str, label: str) -> str:
     slash_value = value.replace("\\", "/")
     required = "derived/base_cycle" if label == "output_root" else "datasets"
@@ -145,7 +160,7 @@ def _is_link_or_junction(path: Path) -> bool:
     except OSError as exc:
         raise DataValidationError(f"cannot inspect path {path}: {exc}") from exc
     return bool(
-        os.path.islink(path)
+        stat.S_ISLNK(metadata.st_mode)
         or getattr(metadata, "st_file_attributes", 0) & 0x400
     )
 
@@ -153,9 +168,15 @@ def _is_link_or_junction(path: Path) -> bool:
 def _assert_existing_components_are_physical(path: Path) -> None:
     components = list(reversed(path.parents)) + [path]
     for component in components:
-        if not component.exists():
+        try:
+            metadata = component.lstat()
+        except FileNotFoundError:
             continue
-        if _is_link_or_junction(component):
+        except OSError as exc:
+            raise DataValidationError(f"cannot inspect path {component}: {exc}") from exc
+        if stat.S_ISLNK(metadata.st_mode) or (
+            getattr(metadata, "st_file_attributes", 0) & 0x400
+        ):
             raise DataValidationError(f"path must not contain a symlink or junction: {path}")
 
 
@@ -225,10 +246,12 @@ def load_base_cycle_config(path: str | Path) -> BaseCycleConfig:
     holdout_scene_id = _text(payload["holdout_scene_id"], "holdout scene ID")
     if holdout_scene_id in development_scene_ids:
         raise DataValidationError("development and holdout scene IDs must not overlap")
-    development_backgrounds = _text_tuple(
+    development_backgrounds = _normalized_path_tuple(
         payload["development_backgrounds"], 2, "development backgrounds"
     )
-    holdout_background = _text(payload["holdout_background"], "holdout background")
+    holdout_background = _normalized_configured_path(
+        payload["holdout_background"], "holdout background"
+    )
     if holdout_background in development_backgrounds:
         raise DataValidationError("development and holdout backgrounds must not overlap")
 
@@ -236,7 +259,9 @@ def load_base_cycle_config(path: str | Path) -> BaseCycleConfig:
         dataset_root=dataset_root,
         output_root=output_root,
         run_name=run_name,
-        real_coco_path=_text(payload["real_coco_path"], "real_coco_path"),
+        real_coco_path=_normalized_configured_path(
+            payload["real_coco_path"], "real_coco_path"
+        ),
         development_scene_ids=(development_scene_ids[0], development_scene_ids[1]),
         holdout_scene_id=holdout_scene_id,
         development_backgrounds=(
@@ -275,6 +300,63 @@ def _assignment_lock(config: BaseCycleConfig) -> dict[str, object]:
         "created_at": datetime.now(timezone.utc).isoformat(),
         "state": "integrity_pending",
     }
+
+
+def _write_json(path: Path, payload: dict[str, object]) -> None:
+    try:
+        path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+    except OSError as exc:
+        raise DataValidationError(f"cannot write Base cycle artifact {path}: {exc}") from exc
+
+
+def _resolve_cycle_output_root_safely(root: Path, *, create: bool) -> Path:
+    candidate = root / "derived" / "base_cycle"
+    _assert_existing_components_are_physical(candidate)
+    if create:
+        try:
+            candidate.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise DataValidationError(
+                f"cannot create Base cycle output root {candidate}: {exc}"
+            ) from exc
+        _assert_existing_components_are_physical(candidate)
+    if not candidate.exists() or not candidate.is_dir():
+        raise DataValidationError(f"Base cycle output root is missing: {candidate}")
+    resolved = candidate.resolve(strict=True)
+    try:
+        resolved.relative_to(root)
+    except ValueError as exc:
+        raise DataValidationError("Base cycle output root escaped dataset root") from exc
+    return resolved
+
+
+def _publish_assignment_lock(
+    config_path: str | Path, config: BaseCycleConfig
+) -> Path:
+    source, repository_root = _resolve_config_context_safely(config_path)
+    if load_base_cycle_config(source) != config:
+        raise DataValidationError("base cycle config changed before lock publication")
+    root = _resolve_dataset_root_safely(config.dataset_root, repository_root)
+    output_root = _resolve_cycle_output_root_safely(root, create=True)
+    output_dir = output_root / config.run_name
+    if output_dir.parent != output_root:
+        raise DataValidationError("run_name must select a direct cycle directory")
+    if os.path.lexists(output_dir):
+        raise DataValidationError(f"base cycle run already exists: {output_dir}")
+
+    staging = output_root / f".{config.run_name}.lock-{uuid.uuid4().hex}"
+    try:
+        staging.mkdir()
+        _write_json(staging / "assignment.lock.json", _assignment_lock(config))
+        staging.rename(output_dir)
+    except Exception:
+        if os.path.lexists(staging):
+            shutil.rmtree(staging)
+        raise
+    return output_dir / "assignment.lock.json"
 
 
 def _validate_config_paths_lexically(config: BaseCycleConfig) -> None:
@@ -512,10 +594,37 @@ def _validate_utc_timestamp(value: object, label: str) -> None:
 
 
 def _validate_assignment_lock(
-    lock_path: str | Path, config: BaseCycleConfig
+    lock_path: str | Path,
+    config: BaseCycleConfig,
+    config_path: str | Path,
 ) -> None:
     lexical = Path(os.path.abspath(os.fspath(lock_path)))
     _reject_evaluation_path(lexical)
+    raw_config = Path(os.path.abspath(os.fspath(config_path)))
+    config_root = next(
+        (
+            parent
+            for parent in raw_config.parents
+            if parent.name == "base_cycle" and parent.parent.name == "configs"
+        ),
+        None,
+    )
+    if config_root is None:
+        raise DataValidationError("base cycle config must be below configs/base_cycle")
+    repository = config_root.parent.parent
+    expected = (
+        repository
+        / config.dataset_root
+        / config.output_root
+        / config.run_name
+        / "assignment.lock.json"
+    )
+    if os.path.normcase(os.path.normpath(lexical)) != os.path.normcase(
+        os.path.normpath(expected)
+    ):
+        raise DataValidationError(
+            "assignment lock must be the physical Base cycle direct child"
+        )
     _assert_existing_components_are_physical(lexical)
     if not lexical.exists() or not lexical.is_file():
         raise DataValidationError(f"assignment lock is missing: {lexical}")
@@ -554,7 +663,7 @@ def _prepare_inventory(
     config: BaseCycleConfig,
     lock_path: str | Path,
 ) -> tuple[Path, dict[str, object]]:
-    _validate_assignment_lock(lock_path, config)
+    _validate_assignment_lock(lock_path, config, config_path)
     source, repository_root = _resolve_config_context_safely(config_path)
     current_config = load_base_cycle_config(source)
     if current_config != config:
