@@ -280,14 +280,18 @@ def _assert_approved_development_fold(
     config: DetectorTrainingConfig, index: int
 ) -> None:
     values = (config.source_detector_run, config.yolo_run_name)
-    folds = {
-        match.group(1)
+    matches = tuple(
+        tuple(match.group(1) for match in _FOLD_TOKEN.finditer(value))
         for value in values
-        for match in _FOLD_TOKEN.finditer(value)
-    }
-    if not folds or not folds <= _APPROVED_DEVELOPMENT_FOLDS:
+    )
+    if (
+        any(len(tokens) != 1 for tokens in matches)
+        or matches[0][0] not in _APPROVED_DEVELOPMENT_FOLDS
+        or matches[0] != matches[1]
+    ):
         raise DataValidationError(
-            f"ensemble member {index} must use approved development folds 0503/0509"
+            f"ensemble member {index} source and YOLO run must use the same "
+            "approved development fold; approved development folds are 0503/0509"
         )
 
 

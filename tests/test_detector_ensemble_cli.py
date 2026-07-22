@@ -12,6 +12,9 @@ from bakery_scanner.detector_ensemble import (
 
 
 def _config(tmp_path: Path) -> DetectorEnsembleConfig:
+    (tmp_path / "datasets").mkdir()
+    (tmp_path / "configs" / "detector_ensemble").mkdir(parents=True)
+    (tmp_path / "pyproject.toml").write_text("[project]\nname='fixture'\n", encoding="utf-8")
     return DetectorEnsembleConfig(
         dataset_root=str(tmp_path / "datasets"),
         output_root=str(tmp_path / "runs"),
@@ -23,6 +26,7 @@ def _config(tmp_path: Path) -> DetectorEnsembleConfig:
         cpu_threads=8,
         cpu_warmups=1,
         cpu_repetitions=3,
+        source_path=tmp_path / "configs" / "detector_ensemble" / "ensemble.yaml",
     )
 
 
@@ -119,3 +123,40 @@ def test_ensemble_cli_prints_validation_split(
     output = capsys.readouterr().out
     assert exit_code == 0
     assert "Split: validation" in output
+
+
+def test_ensemble_cli_resolves_display_paths_from_config_repository(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    config = _config(tmp_path)
+    config = DetectorEnsembleConfig(
+        dataset_root="datasets",
+        output_root="runs/detector_ensemble",
+        run_name=config.run_name,
+        members=config.members,
+        cpu_threads=config.cpu_threads,
+        cpu_warmups=config.cpu_warmups,
+        cpu_repetitions=config.cpu_repetitions,
+        source_path=config.source_path,
+    )
+    report = _report(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    monkeypatch.chdir(outside)
+    monkeypatch.setattr(
+        detector_ensemble_cli, "load_detector_ensemble_config", lambda path: config
+    )
+    monkeypatch.setattr(
+        detector_ensemble_cli, "evaluate_detector_ensemble", lambda value: report
+    )
+
+    exit_code = detector_ensemble_cli.main(["evaluate", "--config", "ensemble.yaml"])
+
+    output = capsys.readouterr().out
+    assert exit_code == 0
+    assert f"Dataset root: {(tmp_path / 'datasets').resolve()}" in output
+    assert f"Member 0 config: {(tmp_path / 'first.yaml').resolve()}" in output
+    assert (
+        f"Output: {(tmp_path / 'runs' / 'detector_ensemble' / 'ensemble').resolve()}"
+        in output
+    )

@@ -4,9 +4,10 @@ import argparse
 import json
 import sys
 from collections.abc import Sequence
-from pathlib import Path
 
 from .detector_ensemble import (
+    _repository_context,
+    _resolve_project_path,
     benchmark_detector_ensemble_cpu,
     evaluate_detector_ensemble,
     load_detector_ensemble_config,
@@ -31,16 +32,17 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def _selection(config) -> dict[str, object]:
+    project_root, dataset_root = _repository_context(config)
     return {
-        "dataset_root": str(Path(config.dataset_root).resolve(strict=False)),
+        "dataset_root": str(dataset_root),
         "output": str(
-            Path(config.output_root).resolve(strict=False) / config.run_name
+            _resolve_project_path(config.output_root, project_root) / config.run_name
         ),
         "members": [
             {
-                "config": str(Path(member.config_path).resolve(strict=False)),
+                "config": str(_resolve_project_path(member.config_path, project_root)),
                 "checkpoint": str(
-                    Path(member.checkpoint_path).resolve(strict=False)
+                    _resolve_project_path(member.checkpoint_path, project_root)
                 ),
             }
             for member in config.members

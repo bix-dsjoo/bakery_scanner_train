@@ -212,14 +212,14 @@ def _evaluation_fixture(
     _write_selected_config(
         configs[0],
         dataset_root=dataset_root,
-        source_run=source_run,
+        source_run="ensemble-source_val0503",
         yolo_run="ensemble-yolo-a_val0503",
         seed=42,
     )
     _write_selected_config(
         configs[1],
         dataset_root=dataset_root,
-        source_run=source_run,
+        source_run="ensemble-source_val0503",
         yolo_run="ensemble-yolo-b_val0503",
         seed=44,
         operating_confidence=0.3 if drift else 0.2,
@@ -472,6 +472,35 @@ def test_evaluate_ensemble_rejects_cycle_holdout_fold_before_yolo_validation(
     config = replace(config, members=(member, config.members[1]))
 
     with pytest.raises(DataValidationError, match="approved development folds"):
+        evaluate_detector_ensemble(config, ComplementaryBackend(truth))
+
+
+@pytest.mark.parametrize(
+    ("source_run", "yolo_run"),
+    [
+        ("base_v2_s42_val0503", "base_v2_s42"),
+        ("base_v2_s42_val0503", "base_v2_s42_val0509"),
+    ],
+)
+def test_evaluate_ensemble_requires_matching_development_fold_tokens(
+    detector_source_run: tuple[Path, str],
+    tmp_path: Path,
+    source_run: str,
+    yolo_run: str,
+) -> None:
+    config, truth, _checkpoints = _evaluation_fixture(detector_source_run, tmp_path)
+    selected_config = Path(config.members[0].config_path)
+    _write_selected_config(
+        selected_config,
+        dataset_root=Path(config.dataset_root),
+        source_run=source_run,
+        yolo_run=yolo_run,
+        seed=42,
+    )
+    member = replace(config.members[0], config_sha256=_sha256(selected_config))
+    config = replace(config, members=(member, config.members[1]))
+
+    with pytest.raises(DataValidationError, match="same approved development fold"):
         evaluate_detector_ensemble(config, ComplementaryBackend(truth))
 
 
