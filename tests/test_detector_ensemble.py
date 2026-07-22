@@ -1,16 +1,23 @@
 from __future__ import annotations
 
+import hashlib
+import json
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 import pytest
 
 from bakery_scanner.detector_ensemble import (
+    DetectorEnsembleConfig,
+    DetectorEnsembleMember,
+    evaluate_detector_ensemble,
     load_detector_ensemble_config,
     merge_member_predictions,
 )
 from bakery_scanner.detector_evaluation import Detection
 from bakery_scanner.detector_postprocess import DetectorPostprocessConfig
 from bakery_scanner.errors import DataValidationError
+from bakery_scanner.yolo_dataset import build_yolo_dataset
 
 
 _SHA_A = "a" * 64
@@ -133,3 +140,221 @@ def test_merge_member_predictions_rejects_contract_mismatch(failure: str) -> Non
             ("scene.jpg",),
             DetectorPostprocessConfig(0.1, 0.5, 2.0),
         )
+
+
+def _sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _write_selected_config(
+    path: Path,
+    *,
+    dataset_root: Path,
+    source_run: str,
+    yolo_run: str,
+    seed: int,
+    operating_confidence: float = 0.2,
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        f"""\
+dataset_root: {dataset_root.as_posix()}
+source_detector_run: {source_run}
+yolo_run_name: {yolo_run}
+output_root: {(path.parent / 'outputs').as_posix()}
+run_name: selected-{seed}
+model: yolo26s.pt
+image_size: 640
+epochs: 50
+batch_size: 16
+seed: {seed}
+device: "0"
+patience: 10
+workers: 0
+thresholds:
+  confidence_floor: 0.001
+  operating_confidence: {operating_confidence}
+  nms_iou: 0.15
+  matching_iou: 0.5
+  max_symmetric_aspect_ratio: 2.0
+""",
+        encoding="utf-8",
+    )
+
+
+def _truth_detections(yolo_manifest: Path) -> dict[str, tuple[Detection, ...]]:
+    payload = json.loads(yolo_manifest.read_text(encoding="utf-8"))
+    result = {}
+    for sample in payload["samples"]:
+        if sample["split"] != "validation":
+            continue
+        detections = []
+        for annotation in sample["original_annotations"]:
+            x, y, width, height = annotation["bbox"]
+            detections.append(
+                Detection((float(x), float(y), float(x + width), float(y + height)), 0.9)
+            )
+        result[Path(sample["image_path"]).name] = tuple(detections)
+    return result
+
+
+def _evaluation_fixture(
+    detector_source_run: tuple[Path, str], tmp_path: Path, *, drift: bool = False
+) -> tuple[DetectorEnsembleConfig, dict[str, tuple[Detection, ...]], tuple[Path, Path]]:
+    dataset_root, source_run = detector_source_run
+    first_yolo = build_yolo_dataset(dataset_root, source_run, "ensemble-yolo-a")
+    second_yolo = build_yolo_dataset(dataset_root, source_run, "ensemble-yolo-b")
+    configs = (tmp_path / "configs" / "first.yaml", tmp_path / "configs" / "second.yaml")
+    _write_selected_config(
+        configs[0],
+        dataset_root=dataset_root,
+        source_run=source_run,
+        yolo_run="ensemble-yolo-a",
+        seed=42,
+    )
+    _write_selected_config(
+        configs[1],
+        dataset_root=dataset_root,
+        source_run=source_run,
+        yolo_run="ensemble-yolo-b",
+        seed=44,
+        operating_confidence=0.3 if drift else 0.2,
+    )
+    checkpoints = (
+        tmp_path / "runs" / "first" / "checkpoints" / "best.pt",
+        tmp_path / "runs" / "second" / "checkpoints" / "best.pt",
+    )
+    for index, checkpoint in enumerate(checkpoints):
+        checkpoint.parent.mkdir(parents=True, exist_ok=True)
+        checkpoint.write_bytes(f"checkpoint-{index}".encode())
+    members = tuple(
+        DetectorEnsembleMember(
+            str(config),
+            _sha256(config),
+            str(checkpoint),
+            _sha256(checkpoint),
+        )
+        for config, checkpoint in zip(configs, checkpoints, strict=True)
+    )
+    config = DetectorEnsembleConfig(
+        dataset_root=str(dataset_root),
+        output_root=str(tmp_path / "ensemble-runs"),
+        run_name="ensemble-evaluation",
+        members=(members[0], members[1]),
+        cpu_threads=8,
+        cpu_warmups=1,
+        cpu_repetitions=3,
+    )
+    return config, _truth_detections(first_yolo.manifest_path), checkpoints
+
+
+class ComplementaryBackend:
+    def __init__(
+        self, truth: Mapping[str, Sequence[Detection]], *, empty: bool = False
+    ) -> None:
+        self.truth = truth
+        self.empty = empty
+        self.predict_calls: list[dict[str, object]] = []
+
+    def cuda_available(self, device: str) -> bool:
+        return device == "0"
+
+    def predict(self, **kwargs) -> Mapping[str, Sequence[Detection]]:
+        self.predict_calls.append(kwargs)
+        member_index = len(self.predict_calls) - 1
+        result = {}
+        for path in kwargs["image_paths"]:
+            detections = () if self.empty else tuple(
+                item
+                for index, item in enumerate(self.truth[path.name])
+                if index % 2 == member_index
+            )
+            result[path.name] = detections
+        return result
+
+
+def test_evaluate_ensemble_recovers_complementary_candidates_and_preserves_hashes(
+    detector_source_run: tuple[Path, str], tmp_path: Path
+) -> None:
+    config, truth, checkpoints = _evaluation_fixture(detector_source_run, tmp_path)
+    backend = ComplementaryBackend(truth)
+    hashes_before = tuple(_sha256(path) for path in checkpoints)
+
+    report = evaluate_detector_ensemble(config, backend)
+
+    metrics = json.loads(report.metrics_path.read_text(encoding="utf-8"))["metrics"]
+    metadata = json.loads(report.metadata_path.read_text(encoding="utf-8"))
+    assert metrics["global"]["true_positive_count"] == metrics["global"][
+        "ground_truth_count"
+    ]
+    assert metrics["global"]["false_positive_count"] == 0
+    assert len(backend.predict_calls) == 2
+    assert [item["checkpoint_sha256"] for item in metadata["members"]] == list(
+        hashes_before
+    )
+    assert tuple(_sha256(path) for path in checkpoints) == hashes_before
+
+
+def test_evaluate_ensemble_accepts_normal_empty_predictions(
+    detector_source_run: tuple[Path, str], tmp_path: Path
+) -> None:
+    config, truth, _checkpoints = _evaluation_fixture(detector_source_run, tmp_path)
+
+    report = evaluate_detector_ensemble(config, ComplementaryBackend(truth, empty=True))
+
+    metrics = json.loads(report.metrics_path.read_text(encoding="utf-8"))["metrics"]
+    assert metrics["global"]["prediction_count"] == 0
+    assert metrics["global"]["true_positive_count"] == 0
+
+
+def test_evaluate_ensemble_rejects_config_hash_drift(
+    detector_source_run: tuple[Path, str], tmp_path: Path
+) -> None:
+    config, truth, _checkpoints = _evaluation_fixture(detector_source_run, tmp_path)
+    bad_member = DetectorEnsembleMember(
+        config.members[0].config_path,
+        "f" * 64,
+        config.members[0].checkpoint_path,
+        config.members[0].checkpoint_sha256,
+    )
+    config = DetectorEnsembleConfig(
+        config.dataset_root,
+        config.output_root,
+        config.run_name,
+        (bad_member, config.members[1]),
+        config.cpu_threads,
+        config.cpu_warmups,
+        config.cpu_repetitions,
+    )
+
+    with pytest.raises(DataValidationError, match="config SHA-256"):
+        evaluate_detector_ensemble(config, ComplementaryBackend(truth))
+
+
+def test_evaluate_ensemble_rejects_member_threshold_drift(
+    detector_source_run: tuple[Path, str], tmp_path: Path
+) -> None:
+    config, truth, _checkpoints = _evaluation_fixture(
+        detector_source_run, tmp_path, drift=True
+    )
+
+    with pytest.raises(DataValidationError, match="inference arguments"):
+        evaluate_detector_ensemble(config, ComplementaryBackend(truth))
+
+
+def test_evaluate_ensemble_rejects_checkpoint_changed_during_inference(
+    detector_source_run: tuple[Path, str], tmp_path: Path
+) -> None:
+    config, truth, checkpoints = _evaluation_fixture(detector_source_run, tmp_path)
+
+    class MutatingBackend(ComplementaryBackend):
+        def predict(self, **kwargs) -> Mapping[str, Sequence[Detection]]:
+            result = super().predict(**kwargs)
+            if len(self.predict_calls) == 2:
+                checkpoints[0].write_bytes(b"mutated")
+            return result
+
+    with pytest.raises(DataValidationError, match="changed during inference"):
+        evaluate_detector_ensemble(config, MutatingBackend(truth))
+
+    assert not (Path(config.output_root) / config.run_name).exists()
