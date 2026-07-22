@@ -374,6 +374,43 @@ def generate_synthetic_dataset(
     backgrounds_root = Path(background_dir).resolve(strict=False)
     assert_training_paths_safe([backgrounds_root], root)
     backgrounds = _image_paths(backgrounds_root)
+    return _generate_synthetic_dataset_from_paths(
+        root, backgrounds, run_name, config, overwrite
+    )
+
+
+def generate_synthetic_dataset_from_backgrounds(
+    dataset_root: str | Path,
+    background_paths: tuple[str | Path, ...] | list[str | Path],
+    run_name: str,
+    config: SyntheticConfig,
+    overwrite: bool = False,
+) -> SyntheticGenerationReport:
+    if not isinstance(config, SyntheticConfig):
+        raise DataValidationError("config must be a SyntheticConfig")
+    config.validate()
+    root = Path(dataset_root).resolve(strict=False)
+    raw_backgrounds = tuple(background_paths)
+    if not raw_backgrounds:
+        raise DataValidationError("at least one explicit background is required")
+    backgrounds = assert_training_paths_safe(raw_backgrounds, root)
+    if len(set(backgrounds)) != len(backgrounds):
+        raise DataValidationError("explicit backgrounds must be unique")
+    for background in backgrounds:
+        if not background.is_file() or background.suffix.casefold() not in IMAGE_SUFFIXES:
+            raise DataValidationError(f"invalid explicit background image: {background}")
+    return _generate_synthetic_dataset_from_paths(
+        root, list(backgrounds), run_name, config, overwrite
+    )
+
+
+def _generate_synthetic_dataset_from_paths(
+    root: Path,
+    backgrounds: list[Path],
+    run_name: str,
+    config: SyntheticConfig,
+    overwrite: bool,
+) -> SyntheticGenerationReport:
     sources = _source_records(root, config.phase)
     output_dir = _run_dir(root, run_name)
     if output_dir.exists():

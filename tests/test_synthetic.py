@@ -14,6 +14,7 @@ from bakery_scanner.synthetic import (
     GENERATOR_VERSION,
     SyntheticConfig,
     generate_synthetic_dataset,
+    generate_synthetic_dataset_from_backgrounds,
     validate_synthetic_dataset,
 )
 
@@ -138,6 +139,32 @@ def test_generation_is_deterministic_for_same_seed_and_inputs(
     assert [_sha256(path) for path in sorted(first.output_dir.glob("*.png"))] == [
         _sha256(path) for path in sorted(second.output_dir.glob("*.png"))
     ]
+
+
+def test_generate_from_explicit_backgrounds_uses_only_allowlisted_files(
+    synthetic_inputs: tuple[Path, Path],
+) -> None:
+    dataset_root, background_dir = synthetic_inputs
+    second = background_dir / "tray_second.png"
+    excluded = background_dir / "tray_excluded.png"
+    Image.new("RGB", (80, 60), (200, 200, 200)).save(second)
+    Image.new("RGB", (80, 60), (190, 190, 190)).save(excluded)
+
+    report = generate_synthetic_dataset_from_backgrounds(
+        dataset_root,
+        (background_dir / "tray.png", second),
+        "explicit",
+        _fixed_config(scene_count=12),
+    )
+
+    manifest = json.loads(report.manifest_path.read_text(encoding="utf-8"))
+    used = {
+        (report.output_dir / scene["background_path"]).resolve()
+        for scene in manifest["scenes"]
+    }
+    assert used == {(background_dir / "tray.png").resolve(), second.resolve()}
+    assert excluded.resolve() not in used
+    assert validate_synthetic_dataset(dataset_root, "explicit").image_count == 12
 
 
 def test_bbox_matches_composited_foreground_pixels(
