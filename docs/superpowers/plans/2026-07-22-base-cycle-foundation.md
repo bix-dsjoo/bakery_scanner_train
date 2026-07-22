@@ -294,7 +294,7 @@ exactly `derived/base_cycle`. Require normalized `dataset_root` to equal exactly
 
 - [ ] **Step 4: Write inventory failure tests**
 
-Add tests that call the internal preparation through `freeze_base_cycle` after declaring its import:
+Add tests for lexical rejection and for the lock-gated internal inventory preparation:
 
 ```python
 def test_configured_test_path_is_rejected_before_any_filesystem_access(
@@ -405,14 +405,14 @@ def test_relocated_repository_produces_same_portable_inventory(
     cycle_fixture, tmp_path
 ) -> None:
     root, config_path = cycle_fixture
+    relocated_repo = tmp_path / "relocated-repo"
+    shutil.copytree(root.parent, relocated_repo)
+    relocated_config = relocated_repo / config_path.relative_to(root.parent)
     _, first = _prepare_inventory(
         config_path,
         load_base_cycle_config(config_path),
         _publish_assignment_lock_for_test(config_path),
     )
-    relocated_repo = tmp_path / "relocated-repo"
-    shutil.copytree(root.parent, relocated_repo)
-    relocated_config = relocated_repo / config_path.relative_to(root.parent)
 
     _, second = _prepare_inventory(
         relocated_config,
