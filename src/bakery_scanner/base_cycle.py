@@ -649,7 +649,8 @@ def _validate_assignment_lock(
     _validate_utc_timestamp(payload["created_at"], "assignment lock created_at")
     expected = _semantic_config(config)
     if (
-        payload["lock_version"] != 1
+        type(payload["lock_version"]) is not int
+        or payload["lock_version"] != 1
         or payload["run_name"] != config.run_name
         or payload["config"] != expected
         or payload["config_sha256"] != _config_sha256(config)
@@ -711,3 +712,410 @@ def _prepare_inventory(
         "seeds": list(config.seeds),
     }
     return root, inventory
+
+
+_LOCK_FIELDS = {
+    "lock_version",
+    "run_name",
+    "config",
+    "config_sha256",
+    "created_at",
+    "state",
+}
+_MANIFEST_FIELDS = {
+    "manifest_version",
+    "cycle_version",
+    "created_at",
+    "run_name",
+    "config",
+    "config_sha256",
+    "registry",
+    "real_coco",
+    "scenes",
+    "backgrounds",
+    "seeds",
+}
+_SHA_RECORD_FIELDS = {"path", "sha256"}
+_SCENE_FIELDS = {
+    "scene_id",
+    "difficulty",
+    "split",
+    "path",
+    "sha256",
+    "width",
+    "height",
+}
+_BACKGROUND_FIELDS = {"split", "path", "sha256"}
+_SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+
+
+def _config_from_semantic(value: object) -> BaseCycleConfig:
+    payload = _strict_object(value, _CONFIG_FIELDS, "config")
+    dataset_root = _text(payload["dataset_root"], "config dataset_root")
+    output_root = _text(payload["output_root"], "config output_root")
+    if dataset_root != "datasets":
+        raise DataValidationError("config dataset_root must be exactly datasets")
+    if output_root != "derived/base_cycle":
+        raise DataValidationError(
+            "config output_root must be exactly derived/base_cycle"
+        )
+    run_name = _text(payload["run_name"], "config run_name")
+    if _RUN_NAME.fullmatch(run_name) is None:
+        raise DataValidationError("config run_name is invalid")
+    development_ids = _text_tuple(
+        payload["development_scene_ids"], 2, "config development scene IDs"
+    )
+    holdout_id = _text(payload["holdout_scene_id"], "config holdout scene ID")
+    if holdout_id in development_ids:
+        raise DataValidationError("config scene IDs overlap")
+    development_backgrounds = _normalized_path_tuple(
+        payload["development_backgrounds"], 2, "config development backgrounds"
+    )
+    holdout_background = _normalized_configured_path(
+        payload["holdout_background"], "config holdout background"
+    )
+    if holdout_background in development_backgrounds:
+        raise DataValidationError("config backgrounds overlap")
+    config = BaseCycleConfig(
+        dataset_root=dataset_root,
+        output_root=output_root,
+        run_name=run_name,
+        real_coco_path=_normalized_configured_path(
+            payload["real_coco_path"], "config real_coco_path"
+        ),
+        development_scene_ids=(development_ids[0], development_ids[1]),
+        holdout_scene_id=holdout_id,
+        development_backgrounds=(
+            development_backgrounds[0],
+            development_backgrounds[1],
+        ),
+        holdout_background=holdout_background,
+        seeds=_seed_tuple(payload["seeds"]),
+    )
+    if _semantic_config(config) != payload:
+        raise DataValidationError("config must use normalized semantic paths")
+    return config
+
+
+def _load_json_object(path: Path, run_dir: Path, label: str) -> dict[str, object]:
+    _assert_existing_components_are_physical(path)
+    if path.parent != run_dir or not path.exists() or not path.is_file():
+        raise DataValidationError(f"output artifact {label} is missing")
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise DataValidationError(f"cannot load output artifact {label}: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise DataValidationError(f"output artifact {label} must be an object")
+    return payload
+
+
+def _validate_sha(value: object, label: str) -> str:
+    if not isinstance(value, str) or _SHA256_PATTERN.fullmatch(value) is None:
+        raise DataValidationError(f"{label} SHA-256 must be 64 lowercase hex characters")
+    return value
+
+
+def _validate_sha_record(
+    value: object, label: str
+) -> tuple[str, str]:
+    record = _strict_object(value, _SHA_RECORD_FIELDS, f"{label} record")
+    path = _text(record["path"], f"{label} path")
+    return path, _validate_sha(record["sha256"], label)
+
+
+def _validated_source(path_value: str, root: Path, label: str) -> Path:
+    normalized = path_value.replace("\\", "/")
+    if (
+        normalized.startswith("/")
+        or PureWindowsPath(path_value).is_absolute()
+        or posixpath.normpath(normalized) != normalized
+        or any(part in {"", ".", ".."} for part in normalized.split("/"))
+    ):
+        raise DataValidationError(f"{label} path must be portable and normalized")
+    _reject_evaluation_path(normalized)
+    return _resolve_configured_input(normalized, root)
+
+
+def _validate_lock_payload(
+    value: object, config: BaseCycleConfig, run_name: str
+) -> dict[str, object]:
+    payload = _strict_object(value, _LOCK_FIELDS, "assignment lock")
+    _validate_utc_timestamp(payload["created_at"], "assignment lock created_at")
+    if type(payload["lock_version"]) is not int or payload["lock_version"] != 1:
+        raise DataValidationError("assignment lock lock_version is invalid")
+    if payload["run_name"] != run_name:
+        raise DataValidationError("assignment lock run_name mismatch")
+    if payload["state"] != "integrity_pending":
+        raise DataValidationError("assignment lock state is invalid")
+    if payload["config"] != _semantic_config(config):
+        raise DataValidationError("assignment lock config mismatch")
+    if payload["config_sha256"] != _config_sha256(config):
+        raise DataValidationError("assignment lock config_sha256 mismatch")
+    return payload
+
+
+def _validate_manifest_payload(
+    root: Path,
+    output_dir: Path,
+    value: object,
+    *,
+    lock_payload: dict[str, object] | None = None,
+) -> BaseCycleReport:
+    payload = _strict_object(value, _MANIFEST_FIELDS, "manifest")
+    if type(payload["manifest_version"]) is not int or payload["manifest_version"] != 1:
+        raise DataValidationError("manifest_version must be 1")
+    if payload["cycle_version"] != CYCLE_VERSION:
+        raise DataValidationError(f"cycle_version must be {CYCLE_VERSION}")
+    _validate_utc_timestamp(payload["created_at"], "manifest created_at")
+    run_name = _text(payload["run_name"], "manifest run_name")
+    if run_name != output_dir.name:
+        raise DataValidationError("manifest run_name mismatch")
+    config = _config_from_semantic(payload["config"])
+    if config.run_name != run_name:
+        raise DataValidationError("config run_name mismatch")
+    expected_config_hash = _config_sha256(config)
+    if payload["config_sha256"] != expected_config_hash:
+        raise DataValidationError("manifest config_sha256 mismatch")
+    if lock_payload is not None:
+        _validate_lock_payload(lock_payload, config, run_name)
+        if lock_payload["config"] != payload["config"]:
+            raise DataValidationError("assignment lock config mismatch")
+
+    registry_path_value, registry_sha = _validate_sha_record(
+        payload["registry"], "registry"
+    )
+    coco_path_value, coco_sha = _validate_sha_record(payload["real_coco"], "real_coco")
+    if registry_path_value != "class_registry.json":
+        raise DataValidationError("registry assignment must use class_registry.json")
+    if coco_path_value != config.real_coco_path:
+        raise DataValidationError("real_coco assignment mismatch")
+
+    raw_scenes = payload["scenes"]
+    raw_backgrounds = payload["backgrounds"]
+    if not isinstance(raw_scenes, list):
+        raise DataValidationError("manifest scenes must be a list")
+    if not isinstance(raw_backgrounds, list):
+        raise DataValidationError("manifest backgrounds must be a list")
+    if len(raw_scenes) != 9:
+        raise DataValidationError("manifest scene count must be 9")
+    if len(raw_backgrounds) != 3:
+        raise DataValidationError("manifest background count must be 3")
+
+    registry_path = _validated_source(registry_path_value, root, "registry")
+    coco_path = _validated_source(coco_path_value, root, "real_coco")
+    if _sha256(registry_path) != registry_sha:
+        raise DataValidationError(f"registry SHA-256 mismatch: {registry_path}")
+    if _sha256(coco_path) != coco_sha:
+        raise DataValidationError(f"real_coco SHA-256 mismatch: {coco_path}")
+    screened_filenames = _load_and_screen_coco_filenames(coco_path)
+    source_records: list[tuple[Path, str, str]] = []
+
+    expected_scene_assignments: dict[str, tuple[str, str, str]] = {}
+    coco_parent = posixpath.dirname(config.real_coco_path)
+    declared_ids = {*config.development_scene_ids, config.holdout_scene_id}
+    declared_difficulties: dict[str, set[str]] = {}
+    for file_name in screened_filenames:
+        match = SCENE_PATTERN.fullmatch(file_name)
+        if match is None:
+            raise DataValidationError(f"COCO scene filename is invalid: {file_name}")
+        scene_id = match.group("scene_id")
+        difficulty = match.group("difficulty")
+        if scene_id not in declared_ids:
+            raise DataValidationError("scene assignment mismatch")
+        difficulties = declared_difficulties.setdefault(scene_id, set())
+        if difficulty in difficulties:
+            raise DataValidationError("scene difficulty assignment is duplicated")
+        difficulties.add(difficulty)
+        split = (
+            "development"
+            if scene_id in config.development_scene_ids
+            else "cycle_holdout"
+        )
+        expected_scene_assignments[posixpath.join(coco_parent, file_name)] = (
+            scene_id,
+            difficulty,
+            split,
+        )
+    if set(declared_difficulties) != declared_ids or any(
+        values != {"e", "m", "h"} for values in declared_difficulties.values()
+    ):
+        raise DataValidationError("scene assignment must contain exactly e/m/h")
+
+    seen_paths: set[str] = set()
+    scene_records: list[dict[str, object]] = []
+    for raw_scene in raw_scenes:
+        scene = _strict_object(raw_scene, _SCENE_FIELDS, "scene")
+        path_value = _text(scene["path"], "scene path")
+        if path_value in seen_paths:
+            raise DataValidationError("manifest contains duplicate path")
+        seen_paths.add(path_value)
+        if path_value not in expected_scene_assignments:
+            raise DataValidationError("scene assignment mismatch")
+        scene_id, difficulty, split = expected_scene_assignments[path_value]
+        if (
+            scene["scene_id"] != scene_id
+            or scene["difficulty"] != difficulty
+            or scene["split"] != split
+        ):
+            raise DataValidationError("scene assignment mismatch")
+        width = scene["width"]
+        height = scene["height"]
+        if (
+            isinstance(width, bool)
+            or not isinstance(width, int)
+            or width <= 0
+            or isinstance(height, bool)
+            or not isinstance(height, int)
+            or height <= 0
+        ):
+            raise DataValidationError("scene dimensions must be positive integers")
+        sha = _validate_sha(scene["sha256"], "scene")
+        source = _validated_source(path_value, root, "scene")
+        source_records.append((source, sha, "scene"))
+        scene_records.append(scene)
+    if set(seen_paths) != set(expected_scene_assignments):
+        raise DataValidationError("scene assignment count mismatch")
+
+    expected_backgrounds = {
+        **{path: "development" for path in config.development_backgrounds},
+        config.holdout_background: "cycle_holdout",
+    }
+    background_records: list[dict[str, object]] = []
+    for raw_background in raw_backgrounds:
+        background = _strict_object(
+            raw_background, _BACKGROUND_FIELDS, "background"
+        )
+        path_value = _text(background["path"], "background path")
+        if path_value in seen_paths:
+            raise DataValidationError("manifest contains duplicate path")
+        seen_paths.add(path_value)
+        if (
+            path_value not in expected_backgrounds
+            or background["split"] != expected_backgrounds[path_value]
+        ):
+            raise DataValidationError("background assignment mismatch")
+        sha = _validate_sha(background["sha256"], "background")
+        source = _validated_source(path_value, root, "background")
+        source_records.append((source, sha, "background"))
+        background_records.append(background)
+    if {str(record["path"]) for record in background_records} != set(expected_backgrounds):
+        raise DataValidationError("background assignment count mismatch")
+
+    seeds = payload["seeds"]
+    if seeds != list(config.seeds) or seeds != [42, 43, 44]:
+        raise DataValidationError("manifest seeds mismatch")
+
+    for source, expected_sha, label in source_records:
+        if _sha256(source) != expected_sha:
+            raise DataValidationError(f"{label} SHA-256 mismatch: {source}")
+
+    registry = load_class_registry(registry_path)
+    _load_and_screen_coco_filenames(coco_path)
+    validate_coco(coco_path, registry, "base")
+    for scene in scene_records:
+        source = _validated_source(str(scene["path"]), root, "scene")
+        if _decode_size(source, "scene image") != (scene["width"], scene["height"]):
+            raise DataValidationError("scene dimensions mismatch")
+    for background in background_records:
+        _decode_size(
+            _validated_source(str(background["path"]), root, "background"),
+            "background",
+        )
+
+    development_count = sum(
+        1 for scene in scene_records if scene["split"] == "development"
+    )
+    holdout_count = sum(
+        1 for scene in scene_records if scene["split"] == "cycle_holdout"
+    )
+    development_background_count = sum(
+        1 for record in background_records if record["split"] == "development"
+    )
+    holdout_background_count = sum(
+        1 for record in background_records if record["split"] == "cycle_holdout"
+    )
+    if (development_count, holdout_count) != (6, 3):
+        raise DataValidationError("scene split count mismatch")
+    if (development_background_count, holdout_background_count) != (2, 1):
+        raise DataValidationError("background split count mismatch")
+    return BaseCycleReport(
+        output_dir=output_dir,
+        manifest_path=output_dir / "manifest.json",
+        development_scene_ids=config.development_scene_ids,
+        holdout_scene_id=config.holdout_scene_id,
+        development_image_count=development_count,
+        holdout_image_count=holdout_count,
+        development_background_count=development_background_count,
+        holdout_background_count=holdout_background_count,
+        seeds=config.seeds,
+    )
+
+
+def _resolve_run_dir_safely(output_root: Path, run_name: str) -> Path:
+    candidate = output_root / run_name
+    if candidate.parent != output_root:
+        raise DataValidationError("run_name must select a direct cycle directory")
+    _assert_existing_components_are_physical(candidate)
+    if not candidate.exists() or not candidate.is_dir():
+        raise DataValidationError(f"Base cycle run is missing: {candidate}")
+    resolved = candidate.resolve(strict=True)
+    if resolved.parent != output_root:
+        raise DataValidationError("Base cycle run escaped output root")
+    return resolved
+
+
+def _validate_run_dir(root: Path, output_dir: Path) -> BaseCycleReport:
+    lock = _load_json_object(
+        output_dir / "assignment.lock.json", output_dir, "assignment.lock.json"
+    )
+    manifest = _load_json_object(
+        output_dir / "manifest.json", output_dir, "manifest.json"
+    )
+    return _validate_manifest_payload(
+        root, output_dir, manifest, lock_payload=lock
+    )
+
+
+def freeze_base_cycle(config_path: str | Path) -> BaseCycleReport:
+    source, repository_root = _resolve_config_context_safely(config_path)
+    config = load_base_cycle_config(source)
+    root = _resolve_dataset_root_safely(config.dataset_root, repository_root)
+    lock_path = _publish_assignment_lock(source, config)
+    output_dir = lock_path.parent
+    manifest_tmp: Path | None = None
+    try:
+        _, inventory = _prepare_inventory(source, config, lock_path)
+        payload: dict[str, object] = {
+            "manifest_version": MANIFEST_VERSION,
+            "cycle_version": CYCLE_VERSION,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "run_name": config.run_name,
+            **inventory,
+        }
+        lock_payload = _load_json_object(
+            lock_path, output_dir, "assignment.lock.json"
+        )
+        _validate_manifest_payload(
+            root, output_dir, payload, lock_payload=lock_payload
+        )
+        manifest_tmp = output_dir / f"manifest.json.tmp-{uuid.uuid4().hex}"
+        _write_json(manifest_tmp, payload)
+        os.replace(manifest_tmp, output_dir / "manifest.json")
+        return _validate_run_dir(root, output_dir)
+    except Exception:
+        if manifest_tmp is not None:
+            manifest_tmp.unlink(missing_ok=True)
+        raise
+
+
+def validate_base_cycle(
+    repository_root: str | Path, run_name: str
+) -> BaseCycleReport:
+    repository = _resolve_repository_root_safely(repository_root)
+    if _RUN_NAME.fullmatch(run_name) is None:
+        raise DataValidationError("run_name is invalid")
+    root = _resolve_dataset_root_safely("datasets", repository)
+    output_root = _resolve_cycle_output_root_safely(root, create=False)
+    output_dir = _resolve_run_dir_safely(output_root, run_name)
+    return _validate_run_dir(root, output_dir)

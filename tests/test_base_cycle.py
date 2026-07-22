@@ -11,13 +11,16 @@ import pytest
 import yaml
 from PIL import Image
 
+import bakery_scanner.base_cycle as base_cycle
 from bakery_scanner.base_cycle import (
     _CONFIG_FIELDS,
     _assert_existing_components_are_physical,
     _assignment_lock,
     _prepare_inventory,
     _publish_assignment_lock,
+    freeze_base_cycle,
     _validate_config_paths_lexically,
+    validate_base_cycle,
     load_base_cycle_config,
 )
 from bakery_scanner.errors import DataValidationError
@@ -504,3 +507,459 @@ def test_relocated_repository_produces_same_portable_inventory(
     )
 
     assert second == first
+
+
+def test_freeze_publishes_lock_before_holdout_byte_access(
+    cycle_fixture, monkeypatch
+) -> None:
+    dataset_root, config_path = cycle_fixture
+    original = base_cycle._sha256
+
+    def guarded_sha256(path: Path) -> str:
+        if "0510" in path.name or path.name == "tray_wood_white_surface.png":
+            lock = (
+                dataset_root
+                / "derived"
+                / "base_cycle"
+                / "base_v2"
+                / "assignment.lock.json"
+            )
+            assert lock.exists()
+            assert json.loads(lock.read_text(encoding="utf-8"))["state"] == (
+                "integrity_pending"
+            )
+        return original(path)
+
+    monkeypatch.setattr(base_cycle, "_sha256", guarded_sha256)
+
+    freeze_base_cycle(config_path)
+
+
+def test_freeze_publishes_hash_bound_manifest_atomically(cycle_fixture) -> None:
+    dataset_root, config_path = cycle_fixture
+
+    report = freeze_base_cycle(config_path)
+
+    expected = (dataset_root / "derived/base_cycle/base_v2").resolve()
+    assert report.output_dir == expected
+    assert report.development_scene_ids == ("0503", "0509")
+    assert report.holdout_scene_id == "0510"
+    assert report.development_image_count == 6
+    assert report.holdout_image_count == 3
+    assert (expected / "assignment.lock.json").exists()
+    manifest = json.loads(report.manifest_path.read_text(encoding="utf-8"))
+    assert set(manifest) == {
+        "manifest_version",
+        "cycle_version",
+        "created_at",
+        "run_name",
+        "config",
+        "config_sha256",
+        "registry",
+        "real_coco",
+        "scenes",
+        "backgrounds",
+        "seeds",
+    }
+    assert {record["split"] for record in manifest["scenes"]} == {
+        "development",
+        "cycle_holdout",
+    }
+    assert not list(expected.glob("*.tmp-*"))
+
+
+def test_validate_replays_every_input_hash(cycle_fixture) -> None:
+    dataset_root, config_path = cycle_fixture
+    freeze_base_cycle(config_path)
+
+    report = validate_base_cycle(dataset_root.parent, "base_v2")
+
+    assert report.development_image_count == 6
+    assert report.holdout_image_count == 3
+
+
+@pytest.mark.parametrize("target", ["scene", "background", "coco", "registry"])
+def test_validate_rejects_tampered_source(cycle_fixture, target: str) -> None:
+    dataset_root, config_path = cycle_fixture
+    freeze_base_cycle(config_path)
+    targets = {
+        "scene": dataset_root / "base/val/scene_e_0503.jpg",
+        "background": dataset_root / "collected/backgrounds/tray_white_square.png",
+        "coco": dataset_root / "base/val/instances_val.json",
+        "registry": dataset_root / "class_registry.json",
+    }
+    targets[target].write_bytes(b"tampered")
+
+    with pytest.raises(DataValidationError, match="SHA-256"):
+        validate_base_cycle(dataset_root.parent, "base_v2")
+
+
+def test_freeze_never_reuses_existing_run(cycle_fixture) -> None:
+    _, config_path = cycle_fixture
+    first = freeze_base_cycle(config_path)
+
+    with pytest.raises(DataValidationError, match="already exists"):
+        freeze_base_cycle(config_path)
+
+    assert first.manifest_path.exists()
+
+
+def test_failed_integrity_keeps_lock_and_no_manifest(
+    cycle_fixture, monkeypatch
+) -> None:
+    dataset_root, config_path = cycle_fixture
+
+    def fail_integrity(*_args, **_kwargs):
+        raise DataValidationError("forced integrity")
+
+    monkeypatch.setattr(base_cycle, "_prepare_inventory", fail_integrity)
+
+    with pytest.raises(DataValidationError, match="forced integrity"):
+        freeze_base_cycle(config_path)
+
+    run = dataset_root / "derived/base_cycle/base_v2"
+    assert (run / "assignment.lock.json").exists()
+    assert not (run / "manifest.json").exists()
+    with pytest.raises(DataValidationError, match="already exists"):
+        freeze_base_cycle(config_path)
+
+
+def test_post_publish_validation_failure_never_reuses_run(
+    cycle_fixture, monkeypatch
+) -> None:
+    dataset_root, config_path = cycle_fixture
+
+    def fail_validation(*_args, **_kwargs):
+        raise DataValidationError("post publish")
+
+    monkeypatch.setattr(base_cycle, "_validate_run_dir", fail_validation)
+
+    with pytest.raises(DataValidationError, match="post publish"):
+        freeze_base_cycle(config_path)
+
+    run = dataset_root / "derived/base_cycle/base_v2"
+    assert (run / "assignment.lock.json").exists()
+    assert (run / "manifest.json").exists()
+    with pytest.raises(DataValidationError, match="already exists"):
+        freeze_base_cycle(config_path)
+
+
+def test_validate_rejects_test_repository_argument_before_resolve(
+    cycle_fixture, monkeypatch
+) -> None:
+    dataset_root, _ = cycle_fixture
+    touched: list[str] = []
+
+    def forbidden_resolve(*_args, **_kwargs):
+        touched.append("resolve")
+        raise AssertionError("evaluation root must be rejected lexically")
+
+    monkeypatch.setattr(Path, "resolve", forbidden_resolve)
+
+    with pytest.raises(DataValidationError, match="evaluation-only"):
+        validate_base_cycle(dataset_root / "base/test", "base_v2")
+    assert touched == []
+
+
+def _mutate_manifest_case(manifest: dict[str, object], case: str) -> None:
+    scenes = manifest["scenes"]
+    backgrounds = manifest["backgrounds"]
+    assert isinstance(scenes, list) and isinstance(backgrounds, list)
+    scene = scenes[0]
+    background = backgrounds[0]
+    assert isinstance(scene, dict) and isinstance(background, dict)
+    if case == "unknown_top_level":
+        manifest["surprise"] = True
+    elif case == "missing_top_level":
+        manifest.pop("cycle_version")
+    elif case == "unknown_scene_field":
+        scene["surprise"] = True
+    elif case == "missing_scene_field":
+        scene.pop("height")
+    elif case == "unknown_background_field":
+        background["surprise"] = True
+    elif case == "missing_background_field":
+        background.pop("sha256")
+    elif case == "unknown_sha_record_field":
+        manifest["registry"]["surprise"] = True  # type: ignore[index]
+    elif case == "missing_sha_record_field":
+        manifest["real_coco"].pop("sha256")  # type: ignore[union-attr]
+    elif case == "manifest_version":
+        manifest["manifest_version"] = 2
+    elif case == "manifest_version_type":
+        manifest["manifest_version"] = 1.0
+    elif case == "cycle_version":
+        manifest["cycle_version"] = "2.0.0"
+    elif case == "manifest_run_name_mismatch":
+        manifest["run_name"] = "other"
+    elif case == "invalid_timestamp":
+        manifest["created_at"] = "invalid"
+    elif case == "non_utc_timestamp":
+        manifest["created_at"] = "2026-01-01T00:00:00+09:00"
+    elif case == "duplicate_path":
+        scenes[1]["path"] = scene["path"]  # type: ignore[index]
+    elif case == "invalid_split":
+        scene["split"] = "test"
+    elif case == "scene_split_overlap":
+        next(item for item in scenes if item["split"] == "cycle_holdout")[  # type: ignore[index]
+            "split"
+        ] = "development"
+    elif case == "background_split_overlap":
+        next(item for item in backgrounds if item["split"] == "cycle_holdout")[  # type: ignore[index]
+            "split"
+        ] = "development"
+    elif case == "wrong_scene_count":
+        scenes.pop()
+    elif case == "wrong_background_count":
+        backgrounds.pop()
+    elif case == "swap_background_assignments":
+        backgrounds[0]["split"], backgrounds[-1]["split"] = (  # type: ignore[index]
+            backgrounds[-1]["split"],  # type: ignore[index]
+            backgrounds[0]["split"],  # type: ignore[index]
+        )
+    elif case == "scene_id_path_remap":
+        scene["scene_id"] = "0510"
+    elif case == "real_coco_authority_mismatch":
+        manifest["real_coco"] = dict(manifest["registry"])  # type: ignore[arg-type]
+    elif case == "registry_authority_mismatch":
+        manifest["registry"] = dict(manifest["real_coco"])  # type: ignore[arg-type]
+    elif case == "path_traversal":
+        scene["path"] = "../escape.jpg"
+    elif case == "config_hash_mismatch":
+        manifest["config_sha256"] = "0" * 64
+    elif case == "config_payload_mismatch":
+        manifest["config"]["holdout_scene_id"] = "0503"  # type: ignore[index]
+    elif case == "seeds_mismatch":
+        manifest["seeds"] = [42, 43, 45]
+    elif case == "invalid_sha_length":
+        scene["sha256"] = "0" * 63
+    elif case == "invalid_sha_case":
+        scene["sha256"] = "A" * 64
+    elif case == "invalid_sha_character":
+        scene["sha256"] = "g" * 64
+    else:
+        raise AssertionError(case)
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "unknown_top_level",
+        "missing_top_level",
+        "unknown_scene_field",
+        "missing_scene_field",
+        "unknown_background_field",
+        "missing_background_field",
+        "unknown_sha_record_field",
+        "missing_sha_record_field",
+        "manifest_version",
+        "manifest_version_type",
+        "cycle_version",
+        "manifest_run_name_mismatch",
+        "invalid_timestamp",
+        "non_utc_timestamp",
+        "duplicate_path",
+        "invalid_split",
+        "scene_split_overlap",
+        "background_split_overlap",
+        "wrong_scene_count",
+        "wrong_background_count",
+        "swap_background_assignments",
+        "scene_id_path_remap",
+        "real_coco_authority_mismatch",
+        "registry_authority_mismatch",
+        "path_traversal",
+        "config_hash_mismatch",
+        "config_payload_mismatch",
+        "seeds_mismatch",
+        "invalid_sha_length",
+        "invalid_sha_case",
+        "invalid_sha_character",
+    ],
+)
+def test_validate_rejects_each_manifest_contract_violation(
+    cycle_fixture, case: str
+) -> None:
+    dataset_root, config_path = cycle_fixture
+    run = freeze_base_cycle(config_path).output_dir
+    manifest_path = run / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    _mutate_manifest_case(manifest, case)
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(DataValidationError):
+        validate_base_cycle(dataset_root.parent, "base_v2")
+
+
+def _mutate_lock_case(lock: dict[str, object], case: str) -> None:
+    if case == "unknown_lock_key":
+        lock["surprise"] = True
+    elif case == "missing_lock_key":
+        lock.pop("state")
+    elif case == "invalid_lock_version":
+        lock["lock_version"] = 2
+    elif case == "invalid_lock_version_type":
+        lock["lock_version"] = 1.0
+    elif case == "invalid_lock_state":
+        lock["state"] = "done"
+    elif case == "invalid_lock_timestamp":
+        lock["created_at"] = "invalid"
+    elif case == "non_utc_lock_timestamp":
+        lock["created_at"] = "2026-01-01T00:00:00+09:00"
+    elif case == "lock_run_name_mismatch":
+        lock["run_name"] = "other"
+    elif case == "lock_config_mismatch":
+        lock["config"]["holdout_scene_id"] = "0503"  # type: ignore[index]
+    elif case == "lock_hash_mismatch":
+        lock["config_sha256"] = "0" * 64
+    else:
+        raise AssertionError(case)
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "unknown_lock_key",
+        "missing_lock_key",
+        "invalid_lock_version",
+        "invalid_lock_version_type",
+        "invalid_lock_state",
+        "invalid_lock_timestamp",
+        "non_utc_lock_timestamp",
+        "lock_run_name_mismatch",
+        "lock_config_mismatch",
+        "lock_hash_mismatch",
+    ],
+)
+def test_validate_rejects_each_assignment_lock_violation(
+    cycle_fixture, case: str
+) -> None:
+    dataset_root, config_path = cycle_fixture
+    run = freeze_base_cycle(config_path).output_dir
+    lock_path = run / "assignment.lock.json"
+    lock = json.loads(lock_path.read_text(encoding="utf-8"))
+    _mutate_lock_case(lock, case)
+    lock_path.write_text(json.dumps(lock), encoding="utf-8")
+
+    with pytest.raises(DataValidationError, match="assignment lock"):
+        validate_base_cycle(dataset_root.parent, "base_v2")
+
+
+def _make_directory_link(alias: Path, target: Path) -> None:
+    if os.name == "nt":
+        subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(alias), str(target)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    else:
+        alias.symlink_to(target, target_is_directory=True)
+
+
+def test_freeze_rejects_output_junction_escape(cycle_fixture, tmp_path) -> None:
+    dataset_root, config_path = cycle_fixture
+    external = tmp_path / "external"
+    external.mkdir()
+    _make_directory_link(dataset_root / "derived", external)
+
+    with pytest.raises(DataValidationError, match="symlink|junction"):
+        freeze_base_cycle(config_path)
+    assert list(external.iterdir()) == []
+
+
+def test_validate_rejects_source_junction_escape(cycle_fixture, tmp_path) -> None:
+    dataset_root, config_path = cycle_fixture
+    freeze_base_cycle(config_path)
+    backgrounds = dataset_root / "collected/backgrounds"
+    external = tmp_path / "external-backgrounds"
+    backgrounds.rename(external)
+    _make_directory_link(backgrounds, external)
+
+    with pytest.raises(DataValidationError, match="symlink|junction"):
+        validate_base_cycle(dataset_root.parent, "base_v2")
+
+
+def test_validate_rejects_linked_run_directory(cycle_fixture, tmp_path) -> None:
+    dataset_root, config_path = cycle_fixture
+    run = freeze_base_cycle(config_path).output_dir
+    external = tmp_path / "external-run"
+    run.rename(external)
+    _make_directory_link(run, external)
+
+    with pytest.raises(DataValidationError, match="symlink|junction"):
+        validate_base_cycle(dataset_root.parent, "base_v2")
+
+
+def test_validate_rejects_missing_source(cycle_fixture) -> None:
+    dataset_root, config_path = cycle_fixture
+    freeze_base_cycle(config_path)
+    (dataset_root / "base/val/scene_e_0503.jpg").unlink()
+
+    with pytest.raises(DataValidationError, match="missing"):
+        validate_base_cycle(dataset_root.parent, "base_v2")
+
+
+def test_validate_screens_coco_before_listing_or_decode(
+    cycle_fixture, monkeypatch
+) -> None:
+    dataset_root, config_path = cycle_fixture
+    run = freeze_base_cycle(config_path).output_dir
+    coco = dataset_root / "base/val/instances_val.json"
+    _inject_coco_image_filename(dataset_root, "base/test/forbidden.jpg")
+    manifest_path = run / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["real_coco"]["sha256"] = base_cycle._sha256(coco)
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    touched: list[str] = []
+
+    def forbidden_list(*_args, **_kwargs):
+        touched.append("iterdir")
+        raise AssertionError("unsafe COCO must be screened before listing")
+
+    def forbidden_decode(*_args, **_kwargs):
+        touched.append("decode")
+        raise AssertionError("unsafe COCO must be screened before decode")
+
+    monkeypatch.setattr(Path, "iterdir", forbidden_list)
+    monkeypatch.setattr(Image, "open", forbidden_decode)
+
+    with pytest.raises(DataValidationError, match="evaluation-only"):
+        validate_base_cycle(dataset_root.parent, "base_v2")
+    assert touched == []
+
+
+def test_relocated_completed_run_validates_with_same_config_hash(
+    cycle_fixture, tmp_path
+) -> None:
+    dataset_root, config_path = cycle_fixture
+    first = freeze_base_cycle(config_path)
+    before = json.loads(first.manifest_path.read_text(encoding="utf-8"))
+    relocated = tmp_path / "relocated-repo"
+    shutil.copytree(dataset_root.parent, relocated)
+
+    report = validate_base_cycle(relocated, "base_v2")
+    after = json.loads(report.manifest_path.read_text(encoding="utf-8"))
+
+    assert after["config_sha256"] == before["config_sha256"]
+
+
+def test_manifest_authority_uses_screened_coco_filename_extension(
+    cycle_fixture,
+) -> None:
+    dataset_root, config_path = cycle_fixture
+    coco_path = dataset_root / "base/val/instances_val.json"
+    payload = json.loads(coco_path.read_text(encoding="utf-8"))
+    source = coco_path.parent / "scene_e_0503.jpg"
+    replacement = source.with_suffix(".png")
+    source.rename(replacement)
+    next(
+        image
+        for image in payload["images"]
+        if image["file_name"] == "scene_e_0503.jpg"
+    )["file_name"] = "scene_e_0503.png"
+    coco_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    report = freeze_base_cycle(config_path)
+
+    assert validate_base_cycle(dataset_root.parent, "base_v2") == report
