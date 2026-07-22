@@ -338,12 +338,16 @@ def _validate_run_dir(
         raise DataValidationError(f"cannot load YOLO data.yaml: {exc}") from exc
     data = _expect_keys(data, {"path", "train", "val", "names"}, "YOLO data.yaml")
     expected_data_root = (data_root or run_dir).resolve(strict=False)
-    if data != {
-        "path": str(expected_data_root),
-        "train": "train/images",
-        "val": "validation/images",
-        "names": {0: "bread"},
-    }:
+    if (
+        not recorded_artifact_path_matches(
+            data["path"],
+            expected_data_root,
+            project_root=dataset_root.parent,
+        )
+        or data["train"] != "train/images"
+        or data["val"] != "validation/images"
+        or data["names"] != {0: "bread"}
+    ):
         raise DataValidationError("YOLO data.yaml disagrees with run layout")
 
     return YoloDatasetReport(

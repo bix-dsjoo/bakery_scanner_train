@@ -360,6 +360,11 @@ bakery-detector evaluate `
 경로 이동을 위해 다시 쓰지 않습니다. 다른 저장소, 다른 상대경로, 경로 traversal,
 누락된 worktree 이름 또는 SHA-256 불일치는 오류로 처리합니다.
 
+YOLO `data.yaml`의 `path`는 provenance hash 필드가 아니라 Ultralytics가 읽는
+operational run root입니다. 이 값도 같은 제한된 worktree relocation만 허용하되,
+그 전에 source manifest hash, 전체 image/label hash와 inventory를 검증하고
+`train`, `val`, `names`는 현재 run layout과 정확히 일치해야 합니다.
+
 ## Classifier 학습 데이터 조립과 검증
 
 `bakery-classifier-data`는 레지스트리에 등록된 단일 객체 이미지와
