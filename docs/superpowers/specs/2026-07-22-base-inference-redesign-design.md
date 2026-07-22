@@ -134,9 +134,10 @@ ViT-B/16은 위 세 후보가 분류 성능 목표를 개선하지 못했을 때
 후보는 동일한 aspect ratio 보존 resize, padding, 정규화와 crop jitter 정책을
 사용한다.
 
-기본 배포 후보는 최고 단일 classifier다. 상위 두 classifier 앙상블은 단일 최고
-모델보다 detector-crop Macro F1과 클래스별 최악 Recall을 개선하고 CPU 지연 gate도
-통과할 때만 허용한다.
+기본 배포 후보는 최고 단일 classifier다. 상위 두 classifier 앙상블은 E5의 최고
+단일 classifier가 분류 목표를 충족하지 못해 E6에 진입한 경우에만 검토한다. 이때도
+단일 최고 모델보다 detector-crop Macro F1과 클래스별 최악 Recall을 개선하고 CPU
+지연 gate를 통과할 때만 허용한다.
 
 ### 4.5 Decision orchestrator
 

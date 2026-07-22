@@ -11,6 +11,7 @@
 ## Global Constraints
 
 - Do not read, list, stat, decode, train on, mine from, calibrate on, or select with `datasets/base/test` or `datasets/incremental/test`.
+- Lexically reject a config path or repository-root argument under either evaluation subtree before any resolve, stat, list, open, or decode.
 - Do not modify original images, existing COCO JSON, `datasets/class_registry.json`, or an existing derived run.
 - Treat `datasets/base/val` as train-authorized scene data and keep `scene_e_*`, `scene_m_*`, and `scene_h_*` with the same numeric scene ID in one group.
 - Use `datasets/class_registry.json` as the sole class authority; never substitute COCO `category_id` for `model_index`.
@@ -51,7 +52,7 @@ None of those model-training or semantic holdout-access actions belongs to this 
 
 The public module exports `BaseCycleConfig`, `BaseCycleReport`,
 `load_base_cycle_config(path)`, `freeze_base_cycle(config_path)`,
-and `validate_base_cycle(dataset_root, run_name)`. Their exact types and
+and `validate_base_cycle(repository_root, run_name)`. Their exact types and
 method bodies are defined in Tasks 1 and 2 and must not be renamed by later plans.
 
 The manifest schema is version 1 and has exactly these top-level keys:
@@ -188,6 +189,24 @@ def test_load_base_cycle_config_accepts_only_repository_datasets(
 
     with pytest.raises(DataValidationError, match="dataset_root"):
         load_base_cycle_config(config_path)
+
+
+def test_config_path_under_test_is_rejected_before_filesystem_access(
+    cycle_fixture, monkeypatch
+) -> None:
+    root, _ = cycle_fixture
+    forbidden = root / "base/test/config.yaml"
+    touched: list[str] = []
+
+    def forbidden_read(*_args, **_kwargs):
+        touched.append("read")
+        raise AssertionError("config bytes must not be read")
+
+    monkeypatch.setattr(Path, "read_text", forbidden_read)
+
+    with pytest.raises(DataValidationError, match="evaluation-only"):
+        load_base_cycle_config(forbidden)
+    assert touched == []
 ```
 
 - [ ] **Step 2: Run the loader tests and verify red**
@@ -291,6 +310,10 @@ three. Reject overlap across development/holdout scene IDs and backgrounds. Requ
 `_RUN_NAME.fullmatch(run_name)` and require the normalized `output_root` to equal
 exactly `derived/base_cycle`. Require normalized `dataset_root` to equal exactly
 `datasets`; absolute, parent-relative, and evaluation-subtree roots are invalid.
+`load_base_cycle_config` must call `_reject_evaluation_path` on the raw argument before
+constructing any resolved path or reading bytes, then use `_resolve_config_context_safely`
+and read only the returned non-link path. Implement those two helpers in this step so the
+red config-path test passes before inventory work begins.
 
 - [ ] **Step 4: Write inventory failure tests**
 
@@ -327,10 +350,17 @@ def test_coco_image_test_path_is_rejected_before_image_filesystem_access(
     _inject_coco_image_filename(root, "base/test/forbidden.jpg")
     lock_path = _publish_assignment_lock_for_test(config_path)
     touched: list[str] = []
-    monkeypatch.setattr(
-        "bakery_scanner.base_cycle._resolve_scene_image",
-        lambda *_: touched.append("filesystem"),
-    )
+
+    def forbidden_list(*_args, **_kwargs):
+        touched.append("iterdir")
+        raise AssertionError("COCO directory must not be listed")
+
+    def forbidden_decode(*_args, **_kwargs):
+        touched.append("decode")
+        raise AssertionError("COCO image must not be decoded")
+
+    monkeypatch.setattr(Path, "iterdir", forbidden_list)
+    monkeypatch.setattr(Image, "open", forbidden_decode)
 
     with pytest.raises(DataValidationError, match="evaluation-only"):
         _prepare_inventory(
@@ -426,8 +456,10 @@ def test_relocated_repository_produces_same_portable_inventory(
 - [ ] **Step 5: Implement inventory preparation**
 
 Implement private helpers `_sha256(path)`, `_portable(path, root)`,
-`_find_repository_root(config_path)`, `_reject_evaluation_path(value)`,
+`_reject_evaluation_path(value)`, `_resolve_config_context_safely(config_path)`,
+`_resolve_repository_root_safely(repository_root)`,
 `_resolve_configured_input(value, root)`, `_decode_size(path, label)`,
+`_load_and_screen_coco_filenames(coco_path)`,
 `_scene_inventory(coco_path, development_ids, holdout_id, root)`,
 `_background_inventory(development, holdout, root)`,
 `_validate_assignment_lock(lock_path, config)`, and
@@ -438,21 +470,28 @@ the final helper returns `tuple[Path, dict[str, object]]`.
 
 1. validate the immutable assignment lock before any configured input is resolved,
    statted, listed, opened, hashed, or decoded;
-2. find the nearest repository ancestor of the config containing both `pyproject.toml`
-   and `AGENTS.md`; fail if none exists, and always resolve relative `dataset_root`
-   from that repository root, never from process CWD or file existence heuristics;
-3. lexically reject any normalized configured path or COCO image filename containing
+2. use `_resolve_config_context_safely` to reject the raw config path lexically before
+   filesystem access, convert it to an absolute path without following links, reject any
+   symlink/junction component with `lstat`, require it below the repository's
+   `configs/base_cycle/` directory, and only then resolve/read it; identify the repository
+   by `pyproject.toml` and `AGENTS.md`, and fail if either sentinel is absent;
+3. always resolve the exact relative `dataset_root: datasets` from that repository root,
+   never from process CWD or file existence heuristics;
+4. lexically reject any normalized configured path or COCO image filename containing
    `base/test` or
    `incremental/test` before `resolve`, `stat`, directory listing, open, or decode;
-4. call `assert_training_paths_safe` on COCO and all backgrounds before any input read;
-5. require every resolved input to remain inside the resolved dataset root and reject
+5. call `assert_training_paths_safe` on COCO and all backgrounds before any input read;
+6. require every resolved input to remain inside the resolved dataset root and reject
    symlink/junction escapes;
-6. load and validate the full registry, assert Base indices are exactly 0-14, then call
+7. read the already-approved COCO JSON once, require every `images[*].file_name` to be
+   a plain basename with no absolute path, separator, `.`/`..`, traversal, or evaluation
+   subtree, and complete this lexical pass before `validate_coco` can list or decode;
+8. load and validate the full registry, assert Base indices are exactly 0-14, then call
    `validate_coco(coco_path, registry, "base")`;
-7. parse every COCO image filename with `SCENE_PATTERN` and require exactly the
+9. parse every screened COCO image filename with `SCENE_PATTERN` and require exactly the
    declared three IDs, each with e/m/h exactly once;
-8. decode every scene and background, require RGB-convertible positive dimensions;
-9. return the resolved root and a deterministic, portable inventory dictionary without
+10. decode every scene and background, require RGB-convertible positive dimensions;
+11. return the resolved root and a deterministic, portable inventory dictionary without
    `created_at`; relocation alone must not alter this dictionary or `config_sha256`.
 
 `_publish_assignment_lock_for_test` is test-only fixture glue: it uses the same pure
@@ -536,7 +575,7 @@ def test_validate_replays_every_input_hash(cycle_fixture) -> None:
     root, config_path = cycle_fixture
     freeze_base_cycle(config_path)
 
-    report = validate_base_cycle(root, "base_v2")
+    report = validate_base_cycle(root.parent, "base_v2")
 
     assert report.development_image_count == 6
     assert report.holdout_image_count == 3
@@ -555,7 +594,7 @@ def test_validate_rejects_tampered_source(cycle_fixture, target: str) -> None:
     targets[target].write_bytes(b"tampered")
 
     with pytest.raises(DataValidationError, match="SHA-256"):
-        validate_base_cycle(root, "base_v2")
+        validate_base_cycle(root.parent, "base_v2")
 
 
 def test_freeze_never_reuses_existing_run(cycle_fixture) -> None:
@@ -604,6 +643,38 @@ def test_post_publish_validation_failure_never_reuses_run(
     assert (run / "manifest.json").exists()
     with pytest.raises(DataValidationError, match="already exists"):
         freeze_base_cycle(config_path)
+
+
+@pytest.mark.parametrize("link_level", ["derived", "base_cycle"])
+def test_freeze_rejects_output_symlink_or_junction_escape(
+    cycle_fixture, tmp_path, link_level: str
+) -> None:
+    root, config_path = cycle_fixture
+    external = tmp_path / "external"
+    external.mkdir()
+    _install_supported_directory_link(root, external, link_level)
+
+    with pytest.raises(DataValidationError, match="output.*link|junction"):
+        freeze_base_cycle(config_path)
+
+    assert list(external.iterdir()) == []
+
+
+def test_validate_rejects_test_repository_argument_before_resolve(
+    cycle_fixture, monkeypatch
+) -> None:
+    root, _ = cycle_fixture
+    touched: list[str] = []
+
+    def forbidden_resolve(*_args, **_kwargs):
+        touched.append("resolve")
+        raise AssertionError("evaluation root must be rejected lexically")
+
+    monkeypatch.setattr(Path, "resolve", forbidden_resolve)
+
+    with pytest.raises(DataValidationError, match="evaluation-only"):
+        validate_base_cycle(root / "base/test", "base_v2")
+    assert touched == []
 ```
 
 - [ ] **Step 2: Run publication tests and verify red**
@@ -622,17 +693,15 @@ Implement the following sequence; no overwrite parameter or recovery path exists
 
 ```python
 def freeze_base_cycle(config_path: str | Path) -> BaseCycleReport:
-    source = Path(config_path).resolve(strict=False)
+    source, repository_root = _resolve_config_context_safely(config_path)
     config = load_base_cycle_config(source)
-    repository_root = _find_repository_root(source)
-    root = _resolve_dataset_root(config.dataset_root, repository_root)
-    output_root = (root / "derived/base_cycle").resolve(strict=False)
+    root = _resolve_dataset_root_safely(config.dataset_root, repository_root)
+    output_root = _resolve_cycle_output_root_safely(root, create=True)
     output_dir = output_root / config.run_name
     if output_dir.parent != output_root:
         raise DataValidationError("run_name must select a direct cycle directory")
     if output_dir.exists():
         raise DataValidationError(f"base cycle run already exists: {output_dir}")
-    output_root.mkdir(parents=True, exist_ok=True)
     lock_staging = output_root / f".{config.run_name}.lock-{uuid.uuid4().hex}"
     lock_staging.mkdir()
     _write_json(lock_staging / "assignment.lock.json", _assignment_lock(config))
@@ -670,10 +739,17 @@ assignment/config data and cannot stat, hash, list, open, or decode configured i
 After the lock directory is renamed into place, every exception intentionally leaves the
 immutable lock and removes any manifest temp file; callers must select a new `run_name`.
 
+`_resolve_cycle_output_root_safely` constructs only `<physical repository>/datasets/
+derived/base_cycle`. Before creating anything it `lstat`s every existing component from
+the physical dataset root through `derived/base_cycle`, rejects symlinks and Windows
+reparse-point/junction attributes, resolves the physical parent, and proves containment
+under the resolved dataset root. It repeats the no-link and containment checks after
+directory creation. Tests cover links at both `derived` and `base_cycle` levels.
+
 - [ ] **Step 4: Write strict independent-validation tests and verify red**
 
 Add one red test for every validator promise, using a helper that freezes a valid run,
-mutates `manifest.json`, and calls `validate_base_cycle(root, "base_v2")`:
+mutates `manifest.json`, and calls `validate_base_cycle(root.parent, "base_v2")`:
 
 ```python
 @pytest.mark.parametrize(
@@ -701,6 +777,11 @@ mutates `manifest.json`, and calls `validate_base_cycle(root, "base_v2")`:
         ("wrong_background_count", "count"),
         ("path_traversal", "path"),
         ("config_hash_mismatch", "config_sha256"),
+        ("config_payload_mismatch", "config"),
+        ("seeds_mismatch", "seeds"),
+        ("invalid_sha_length", "SHA-256"),
+        ("invalid_sha_case", "SHA-256"),
+        ("invalid_sha_character", "SHA-256"),
     ],
 )
 def test_validate_rejects_each_manifest_contract_violation(
@@ -713,13 +794,14 @@ def test_validate_rejects_each_manifest_contract_violation(
     (run / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
 
     with pytest.raises(DataValidationError, match=message):
-        validate_base_cycle(root, "base_v2")
+        validate_base_cycle(root.parent, "base_v2")
 
 
 @pytest.mark.parametrize(
     "case",
     [
-        "unknown_lock_key", "missing_lock_key", "invalid_lock_timestamp",
+        "unknown_lock_key", "missing_lock_key", "invalid_lock_version",
+        "invalid_lock_state", "invalid_lock_timestamp",
         "non_utc_lock_timestamp", "lock_run_name_mismatch",
         "lock_config_mismatch", "lock_hash_mismatch",
     ],
@@ -735,7 +817,7 @@ def test_validate_rejects_each_assignment_lock_violation(
     lock_path.write_text(json.dumps(lock), encoding="utf-8")
 
     with pytest.raises(DataValidationError, match="assignment lock"):
-        validate_base_cycle(root, "base_v2")
+        validate_base_cycle(root.parent, "base_v2")
 
 
 @pytest.mark.parametrize("case", ["symlink_escape", "junction_escape"])
@@ -744,7 +826,7 @@ def test_validate_rejects_link_escape(cycle_fixture, case: str) -> None:
     root, config_path = cycle_fixture
     _replace_manifest_source_with_external_link(root, config_path, case)
     with pytest.raises(DataValidationError, match="escape"):
-        validate_base_cycle(root, "base_v2")
+        validate_base_cycle(root.parent, "base_v2")
 
 
 def test_validate_rejects_missing_source(cycle_fixture) -> None:
@@ -752,7 +834,7 @@ def test_validate_rejects_missing_source(cycle_fixture) -> None:
     freeze_base_cycle(config_path)
     (root / "base/val/scene_e_0503.jpg").unlink()
     with pytest.raises(DataValidationError, match="missing"):
-        validate_base_cycle(root, "base_v2")
+        validate_base_cycle(root.parent, "base_v2")
 
 
 def test_relocated_completed_run_validates_with_same_config_hash(
@@ -763,9 +845,7 @@ def test_relocated_completed_run_validates_with_same_config_hash(
     before = json.loads(first.manifest_path.read_text(encoding="utf-8"))
     relocated_repo = tmp_path / "relocated-repo"
     shutil.copytree(root.parent, relocated_repo)
-    relocated_root = relocated_repo / root.relative_to(root.parent)
-
-    report = validate_base_cycle(relocated_root, "base_v2")
+    report = validate_base_cycle(relocated_repo, "base_v2")
     after = json.loads(report.manifest_path.read_text(encoding="utf-8"))
 
     assert after["config_sha256"] == before["config_sha256"]
@@ -782,12 +862,13 @@ Implement `_load_json_object`, `_validate_sha_record`, `_validate_manifest_paylo
 
 ```python
 def validate_base_cycle(
-    dataset_root: str | Path, run_name: str
+    repository_root: str | Path, run_name: str
 ) -> BaseCycleReport:
-    root = Path(dataset_root).resolve(strict=False)
+    repository = _resolve_repository_root_safely(repository_root)
+    root = _resolve_dataset_root_safely("datasets", repository)
     if not _RUN_NAME.fullmatch(run_name):
         raise DataValidationError("run_name is invalid")
-    output_root = (root / "derived/base_cycle").resolve(strict=False)
+    output_root = _resolve_cycle_output_root_safely(root, create=False)
     run_dir = output_root / run_name
     if run_dir.parent != output_root:
         raise DataValidationError("run_name must select a direct cycle directory")
@@ -800,7 +881,15 @@ than 1/`1.0.0`, non-UTC or invalid `created_at`, duplicate paths, wrong split na
 missing e/m/h variants, scene/background overlap across splits, wrong counts, path
 traversal, symlink/junction escapes, missing files, and SHA drift. It reruns registry and
 COCO validation and reconstructs `BaseCycleReport` only from validated manifest data.
+The lock must have `lock_version == 1` and `state == "integrity_pending"`; manifest seeds
+must exactly match both lock/config seeds and the checked-in `[42, 43, 44]`. Every SHA-256
+field is exactly 64 lowercase hexadecimal characters before any hash comparison.
 Neither the public API nor the CLI accepts an alternate output root.
+`_resolve_repository_root_safely` lexically rejects an evaluation-subtree argument before
+`resolve` or any other filesystem call, converts a safe argument to an absolute path
+without following links, rejects a symlink/junction root, requires `pyproject.toml` and
+`AGENTS.md`, then derives the sole dataset and output roots. The test above proves the
+early rejection by making `Path.resolve` observable.
 
 - [ ] **Step 6: Run the focused and full foundation tests**
 
@@ -862,7 +951,7 @@ def test_validate_cli_json(monkeypatch, capsys) -> None:
 
     assert base_cycle_cli.main([
         "validate",
-        "--dataset-root", "datasets",
+        "--repository-root", ".",
         "--run-name", "base_v2",
         "--json",
     ]) == 0
@@ -916,7 +1005,7 @@ def _parser() -> argparse.ArgumentParser:
     freeze.add_argument("--config", required=True)
     freeze.add_argument("--json", action="store_true")
     validate = commands.add_parser("validate")
-    validate.add_argument("--dataset-root", default="datasets")
+    validate.add_argument("--repository-root", default=".")
     validate.add_argument("--run-name", required=True)
     validate.add_argument("--json", action="store_true")
     return parser
@@ -936,7 +1025,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "freeze":
             report = freeze_base_cycle(args.config)
         else:
-            report = validate_base_cycle(args.dataset_root, args.run_name)
+            report = validate_base_cycle(args.repository_root, args.run_name)
     except DataValidationError as exc:
         print(f"Base cycle command failed: {exc}", file=sys.stderr)
         return 1
@@ -1020,7 +1109,7 @@ Add a “Base v2 cycle 격리” subsection describing:
 
 ```powershell
 bakery-base-cycle freeze --config configs/base_cycle/base_v2.yaml
-bakery-base-cycle validate --dataset-root datasets --run-name base_v2
+bakery-base-cycle validate --repository-root . --run-name base_v2
 ```
 
 State explicitly:
@@ -1070,7 +1159,7 @@ correcting the cause.
 - [ ] **Step 5: Independently replay-validate the real artifact**
 
 ```powershell
-bakery-base-cycle validate --dataset-root datasets --run-name base_v2 --json
+bakery-base-cycle validate --repository-root . --run-name base_v2 --json
 ```
 
 Expected JSON contains `status: "ok"`, six development images, three holdout images, two development backgrounds, one holdout background, and seeds `[42, 43, 44]`.
