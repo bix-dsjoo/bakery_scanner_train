@@ -56,18 +56,21 @@ def recorded_artifact_path_matches(
 
 함수는 filesystem을 수정하지 않으며 다음 순서로 판정한다.
 
-1. `actual_path`와 `project_root`를 `resolve(strict=False)`로 정규화한다.
-2. `actual_path`가 `project_root` 아래에 없으면 거부한다.
-3. 현재 상대경로의 첫 segment가 `datasets`, `runs`, `configs`, `models` 중 하나가
+1. 기록 경로가 문자열 또는 `Path`가 아니면 거부한다.
+2. `actual_path`와 `project_root`를 `resolve(strict=False)`로 정규화한다.
+3. `actual_path`가 `project_root` 아래에 없으면 거부한다.
+4. 현재 상대경로의 첫 segment가 `datasets`, `runs`, `configs`, `models` 중 하나가
    아니면 거부한다.
-4. 기록 경로가 현재 절대경로와 같으면 통과한다.
-5. 기록 경로를 `/`와 `\` 모두 인식하는 segment 목록으로 정규화한다.
-6. 기록 경로에서 현재 저장소 이름과 같은 마지막 segment 뒤를 선택한다.
-7. 선택한 tail이 현재 상대경로와 같으면 통과한다.
-8. 선택한 tail이 `.worktrees/<worktree-name>/<현재 상대경로>`와 정확히 같으면
+5. 기록 경로와 현재 project root를 `/`와 `\` 모두 인식하는 segment 목록으로
+   정규화하고, `.` 또는 `..`가 있으면 거부한다.
+6. 기록 경로의 전체 prefix가 현재 project root의 drive·parent·저장소 이름을
+   포함한 모든 segment와 일치하지 않으면 거부한다.
+7. 기록 경로가 현재 절대경로와 같으면 통과한다.
+8. project-root prefix 뒤의 tail이 현재 상대경로와 같으면 통과한다.
+9. tail이 `.worktrees/<worktree-name>/<현재 상대경로>`와 정확히 같으면
    relocation으로 통과한다.
-9. 빈 worktree 이름, `.` 또는 `..`, 추가 중간 segment, 다른 저장소 이름, 다른
-   상대경로는 거부한다.
+10. 빈 worktree 이름, 추가 중간 segment, 다른 drive·parent·저장소 또는 다른
+    상대경로는 거부한다.
 
 Windows checkout의 drive와 대소문자 차이는 정규화하되 path segment의 수와 순서는
 완전히 같아야 한다. 함수는 basename이나 suffix 일부만으로 일치시키지 않는다.
