@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import ntpath
 import os
 import posixpath
 import re
@@ -142,8 +143,22 @@ def _normalized_contract_root(value: str, label: str) -> str:
 
 
 def _lexical_parts(value: str | os.PathLike[str]) -> tuple[str, ...]:
-    normalized = os.fspath(value).replace("\\", "/").casefold()
-    return tuple(part for part in normalized.split("/") if part not in ("", "."))
+    normalized = os.fspath(value).replace("\\", "/")
+    drive, tail = ntpath.splitdrive(normalized)
+    parts = [drive.casefold()] if drive else []
+    root_depth = len(parts)
+    for raw_part in tail.split("/"):
+        if raw_part in ("", "."):
+            continue
+        if raw_part == "..":
+            if len(parts) == root_depth:
+                raise DataValidationError(
+                    f"path contains parent traversal beyond its lexical root: {value}"
+                )
+            parts.pop()
+            continue
+        parts.append(raw_part.casefold())
+    return tuple(parts)
 
 
 def _reject_evaluation_path(value: str | os.PathLike[str]) -> None:

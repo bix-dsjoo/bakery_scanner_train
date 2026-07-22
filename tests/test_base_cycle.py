@@ -18,6 +18,7 @@ from bakery_scanner.base_cycle import (
     _assignment_lock,
     _prepare_inventory,
     _publish_assignment_lock,
+    _reject_evaluation_path,
     freeze_base_cycle,
     _validate_config_paths_lexically,
     validate_base_cycle,
@@ -293,6 +294,62 @@ def test_config_path_under_test_is_rejected_before_filesystem_access(
     with pytest.raises(DataValidationError, match="evaluation-only"):
         load_base_cycle_config(forbidden)
     assert touched == []
+
+
+@pytest.mark.parametrize("operation", ["load", "freeze"])
+def test_dotdot_config_test_path_is_rejected_before_any_filesystem_access(
+    cycle_fixture, monkeypatch, operation: str
+) -> None:
+    dataset_root, _ = cycle_fixture
+    forbidden = dataset_root / "base" / "x" / ".." / "test" / "config.yaml"
+    touched: list[str] = []
+
+    def forbidden_access(*_args, **_kwargs):
+        touched.append("filesystem")
+        raise AssertionError("normalized evaluation path must be rejected lexically")
+
+    with monkeypatch.context() as guard:
+        guard.setattr(base_cycle.os.path, "abspath", forbidden_access)
+        guard.setattr(Path, "lstat", forbidden_access)
+        guard.setattr(Path, "stat", forbidden_access)
+        guard.setattr(Path, "exists", forbidden_access)
+        guard.setattr(Path, "resolve", forbidden_access)
+        with pytest.raises(DataValidationError, match="evaluation-only"):
+            if operation == "load":
+                load_base_cycle_config(forbidden)
+            else:
+                freeze_base_cycle(forbidden)
+
+    assert touched == []
+
+
+def test_dotdot_test_repository_is_rejected_before_any_filesystem_access(
+    cycle_fixture, monkeypatch
+) -> None:
+    dataset_root, _ = cycle_fixture
+    forbidden = dataset_root / "base" / "x" / ".." / "test"
+    touched: list[str] = []
+
+    def forbidden_access(*_args, **_kwargs):
+        touched.append("filesystem")
+        raise AssertionError("normalized evaluation root must be rejected lexically")
+
+    with monkeypatch.context() as guard:
+        guard.setattr(base_cycle.os.path, "abspath", forbidden_access)
+        guard.setattr(Path, "lstat", forbidden_access)
+        guard.setattr(Path, "stat", forbidden_access)
+        guard.setattr(Path, "exists", forbidden_access)
+        guard.setattr(Path, "resolve", forbidden_access)
+        with pytest.raises(DataValidationError, match="evaluation-only"):
+            validate_base_cycle(forbidden, "base_v2")
+
+    assert touched == []
+
+
+@pytest.mark.parametrize("value", ["../safe", "/../safe", "C:/../safe"])
+def test_lexical_path_rejects_parent_traversal_beyond_root(value: str) -> None:
+    with pytest.raises(DataValidationError, match="parent traversal"):
+        _reject_evaluation_path(value)
 
 
 def test_physical_component_check_rejects_link_without_stat_or_resolve(
