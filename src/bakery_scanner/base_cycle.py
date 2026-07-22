@@ -820,7 +820,12 @@ def _validate_sha_record(
     value: object, label: str
 ) -> tuple[str, str]:
     record = _strict_object(value, _SHA_RECORD_FIELDS, f"{label} record")
-    path = _text(record["path"], f"{label} path")
+    raw_path = record["path"]
+    path = _text(raw_path, f"{label} path")
+    if raw_path != path:
+        raise DataValidationError(
+            f"{label} path must be an exact normalized portable string"
+        )
     return path, _validate_sha(record["sha256"], label)
 
 

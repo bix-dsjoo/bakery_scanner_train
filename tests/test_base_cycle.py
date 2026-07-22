@@ -723,6 +723,12 @@ def _mutate_manifest_case(manifest: dict[str, object], case: str) -> None:
         manifest["real_coco"] = dict(manifest["registry"])  # type: ignore[arg-type]
     elif case == "registry_authority_mismatch":
         manifest["registry"] = dict(manifest["real_coco"])  # type: ignore[arg-type]
+    elif case == "registry_path_whitespace":
+        manifest["registry"]["path"] = " class_registry.json "  # type: ignore[index]
+    elif case == "real_coco_path_whitespace":
+        manifest["real_coco"]["path"] = (  # type: ignore[index]
+            " base/val/instances_val.json "
+        )
     elif case == "path_traversal":
         scene["path"] = "../escape.jpg"
     elif case == "config_hash_mismatch":
@@ -768,6 +774,8 @@ def _mutate_manifest_case(manifest: dict[str, object], case: str) -> None:
         "scene_id_path_remap",
         "real_coco_authority_mismatch",
         "registry_authority_mismatch",
+        "registry_path_whitespace",
+        "real_coco_path_whitespace",
         "path_traversal",
         "config_hash_mismatch",
         "config_payload_mismatch",
