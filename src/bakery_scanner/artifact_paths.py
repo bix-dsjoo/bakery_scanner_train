@@ -27,6 +27,8 @@ def recorded_artifact_path_matches(
     *,
     project_root: Path,
 ) -> bool:
+    if not isinstance(recorded_path, (str, Path)):
+        return False
     root = Path(project_root).resolve(strict=False)
     actual = Path(actual_path).resolve(strict=False)
     try:
@@ -39,18 +41,17 @@ def recorded_artifact_path_matches(
     ):
         return False
     recorded_parts = _portable_parts(recorded_path)
-    if recorded_parts is None:
+    root_parts = _portable_parts(root)
+    if (
+        recorded_parts is None
+        or root_parts is None
+        or len(recorded_parts) <= len(root_parts)
+        or not _same_parts(recorded_parts[: len(root_parts)], root_parts)
+    ):
         return False
     if Path(recorded_path).resolve(strict=False) == actual:
         return True
-    root_positions = [
-        index
-        for index, part in enumerate(recorded_parts)
-        if part.casefold() == root.name.casefold()
-    ]
-    if not root_positions:
-        return False
-    tail = recorded_parts[root_positions[-1] + 1 :]
+    tail = recorded_parts[len(root_parts) :]
     expected = tuple(relative.parts)
     if _same_parts(tail, expected):
         return True

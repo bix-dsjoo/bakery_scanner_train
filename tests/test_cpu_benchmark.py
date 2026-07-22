@@ -133,6 +133,32 @@ def test_classifier_provenance_rejects_relocated_manifest_hash_drift(
         )
 
 
+def test_classifier_provenance_rejects_non_path_manifest_metadata(
+    tmp_path: Path,
+) -> None:
+    (
+        project_root,
+        manifest,
+        checkpoint,
+        detector_checkpoint,
+        context,
+        metadata,
+        config,
+    ) = _relocated_classifier_provenance_fixture(tmp_path)
+    metadata["dataset"]["manifest_path"] = None
+
+    with pytest.raises(DataValidationError, match="classifier metadata dataset"):
+        _validate_classifier_checkpoint_provenance(
+            config=config,
+            checkpoint=checkpoint,
+            metadata=metadata,
+            classifier_manifest_path=manifest,
+            classifier_context=context,
+            detector_checkpoint=detector_checkpoint,
+            project_root=project_root,
+        )
+
+
 def _payload() -> dict[str, object]:
     return {
         "dataset_root": "datasets",

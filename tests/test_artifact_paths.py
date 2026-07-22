@@ -91,3 +91,60 @@ def test_artifact_path_rejects_absolute_traversal_even_if_it_resolves_to_actual(
         actual,
         project_root=root,
     )
+
+
+@pytest.mark.parametrize(
+    "recorded",
+    [
+        "D:/unrelated/bakery_scanner_train/.worktrees/old/datasets/manifest.json",
+        "junk/bakery_scanner_train/.worktrees/old/datasets/manifest.json",
+    ],
+)
+def test_artifact_path_rejects_same_repository_name_under_another_parent(
+    tmp_path: Path,
+    recorded: str,
+) -> None:
+    root = tmp_path / "bakery_scanner_train"
+    actual = root / "datasets" / "manifest.json"
+
+    assert not recorded_artifact_path_matches(
+        recorded,
+        actual,
+        project_root=root,
+    )
+
+
+def test_artifact_path_rejects_same_repository_name_in_sibling_tree(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "workspace" / "bakery_scanner_train"
+    actual = root / "datasets" / "manifest.json"
+    recorded = (
+        tmp_path
+        / "unrelated"
+        / root.name
+        / ".worktrees"
+        / "old"
+        / "datasets"
+        / "manifest.json"
+    )
+
+    assert not recorded_artifact_path_matches(
+        recorded,
+        actual,
+        project_root=root,
+    )
+
+
+@pytest.mark.parametrize("recorded", [None, 42, object()])
+def test_artifact_path_rejects_non_path_metadata_values(
+    tmp_path: Path,
+    recorded: object,
+) -> None:
+    root = tmp_path / "bakery_scanner_train"
+
+    assert not recorded_artifact_path_matches(
+        recorded,  # type: ignore[arg-type]
+        root / "datasets" / "manifest.json",
+        project_root=root,
+    )
