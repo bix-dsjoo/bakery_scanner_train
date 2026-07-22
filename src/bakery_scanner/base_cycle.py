@@ -1,0 +1,604 @@
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import posixpath
+import re
+import shutil
+import uuid
+from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
+from pathlib import Path, PureWindowsPath
+from typing import Any
+
+import yaml
+from PIL import Image, UnidentifiedImageError
+
+from .coco import validate_coco
+from .errors import DataValidationError
+from .registry import load_class_registry
+from .splits import SCENE_PATTERN
+
+CYCLE_VERSION = "1.0.0"
+MANIFEST_VERSION = 1
+_RUN_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+_CONFIG_FIELDS = {
+    "dataset_root",
+    "output_root",
+    "run_name",
+    "real_coco_path",
+    "development_scene_ids",
+    "holdout_scene_id",
+    "development_backgrounds",
+    "holdout_background",
+    "seeds",
+}
+
+
+@dataclass(frozen=True, slots=True)
+class BaseCycleConfig:
+    dataset_root: str
+    output_root: str
+    run_name: str
+    real_coco_path: str
+    development_scene_ids: tuple[str, str]
+    holdout_scene_id: str
+    development_backgrounds: tuple[str, str]
+    holdout_background: str
+    seeds: tuple[int, int, int]
+
+
+@dataclass(frozen=True, slots=True)
+class BaseCycleReport:
+    output_dir: Path
+    manifest_path: Path
+    development_scene_ids: tuple[str, str]
+    holdout_scene_id: str
+    development_image_count: int
+    holdout_image_count: int
+    development_background_count: int
+    holdout_background_count: int
+    seeds: tuple[int, int, int]
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "status": "ok",
+            "output_dir": str(self.output_dir),
+            "manifest_path": str(self.manifest_path),
+            "development_scene_ids": list(self.development_scene_ids),
+            "holdout_scene_id": self.holdout_scene_id,
+            "development_image_count": self.development_image_count,
+            "holdout_image_count": self.holdout_image_count,
+            "development_background_count": self.development_background_count,
+            "holdout_background_count": self.holdout_background_count,
+            "seeds": list(self.seeds),
+        }
+
+
+def _strict_object(value: object, fields: set[str], label: str) -> dict[str, object]:
+    if not isinstance(value, dict) or not all(isinstance(key, str) for key in value):
+        raise DataValidationError(f"{label} must be an object")
+    actual = set(value)
+    missing = sorted(fields - actual)
+    unknown = sorted(actual - fields)
+    if missing:
+        raise DataValidationError(f"{label} has missing fields: {missing}")
+    if unknown:
+        raise DataValidationError(f"{label} has unknown fields: {unknown}")
+    return value  # type: ignore[return-value]
+
+
+def _text(value: object, label: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise DataValidationError(f"{label} must be a non-empty string")
+    return value.strip()
+
+
+def _text_tuple(value: object, length: int, label: str) -> tuple[str, ...]:
+    if not isinstance(value, list) or len(value) != length:
+        number = "two" if length == 2 else str(length)
+        raise DataValidationError(f"{label} must contain exactly {number} values")
+    parsed = tuple(_text(item, label) for item in value)
+    if len(set(parsed)) != len(parsed):
+        raise DataValidationError(f"{label} must be unique")
+    return parsed
+
+
+def _seed_tuple(value: object) -> tuple[int, int, int]:
+    if not isinstance(value, list) or len(value) != 3:
+        raise DataValidationError("seeds must contain exactly three values")
+    if any(isinstance(seed, bool) or not isinstance(seed, int) or seed < 0 for seed in value):
+        raise DataValidationError("seeds must be non-negative integers")
+    if len(set(value)) != 3:
+        raise DataValidationError("seeds must be unique")
+    return value[0], value[1], value[2]
+
+
+def _normalized_contract_root(value: str, label: str) -> str:
+    slash_value = value.replace("\\", "/")
+    required = "derived/base_cycle" if label == "output_root" else "datasets"
+    if slash_value.startswith("/") or PureWindowsPath(value).is_absolute():
+        raise DataValidationError(f"{label} must be exactly {required}")
+    normalized = posixpath.normpath(slash_value)
+    if normalized == ".." or normalized.startswith("../"):
+        raise DataValidationError(f"{label} must be exactly {required}")
+    return normalized
+
+
+def _lexical_parts(value: str | os.PathLike[str]) -> tuple[str, ...]:
+    normalized = os.fspath(value).replace("\\", "/").casefold()
+    return tuple(part for part in normalized.split("/") if part not in ("", "."))
+
+
+def _reject_evaluation_path(value: str | os.PathLike[str]) -> None:
+    parts = _lexical_parts(value)
+    for forbidden in (("base", "test"), ("incremental", "test")):
+        width = len(forbidden)
+        if any(parts[index : index + width] == forbidden for index in range(len(parts) - width + 1)):
+            raise DataValidationError(f"evaluation-only path is forbidden: {value}")
+
+
+def _is_link_or_junction(path: Path) -> bool:
+    try:
+        metadata = path.lstat()
+    except OSError as exc:
+        raise DataValidationError(f"cannot inspect path {path}: {exc}") from exc
+    return bool(
+        os.path.islink(path)
+        or getattr(metadata, "st_file_attributes", 0) & 0x400
+    )
+
+
+def _assert_existing_components_are_physical(path: Path) -> None:
+    components = list(reversed(path.parents)) + [path]
+    for component in components:
+        if not component.exists():
+            continue
+        if _is_link_or_junction(component):
+            raise DataValidationError(f"path must not contain a symlink or junction: {path}")
+
+
+def _resolve_config_context_safely(
+    config_path: str | Path,
+) -> tuple[Path, Path]:
+    _reject_evaluation_path(config_path)
+    lexical = Path(os.path.abspath(os.fspath(config_path)))
+    _assert_existing_components_are_physical(lexical)
+    if not lexical.exists() or not lexical.is_file():
+        raise DataValidationError(f"base cycle config is missing: {lexical}")
+
+    repository_root: Path | None = None
+    for candidate in lexical.parents:
+        pyproject = candidate / "pyproject.toml"
+        agents = candidate / "AGENTS.md"
+        if pyproject.exists() and agents.exists():
+            if _is_link_or_junction(pyproject) or _is_link_or_junction(agents):
+                raise DataValidationError("repository sentinels must not be links or junctions")
+            if not pyproject.is_file() or not agents.is_file():
+                continue
+            repository_root = candidate
+            break
+    if repository_root is None:
+        raise DataValidationError("config repository must contain pyproject.toml and AGENTS.md")
+
+    config_root = repository_root / "configs" / "base_cycle"
+    try:
+        lexical.relative_to(config_root)
+    except ValueError as exc:
+        raise DataValidationError("base cycle config must be below configs/base_cycle") from exc
+
+    resolved = lexical.resolve(strict=True)
+    resolved_repository = repository_root.resolve(strict=True)
+    try:
+        resolved.relative_to(resolved_repository)
+    except ValueError as exc:
+        raise DataValidationError("base cycle config escaped its repository") from exc
+    return resolved, resolved_repository
+
+
+def load_base_cycle_config(path: str | Path) -> BaseCycleConfig:
+    source, _ = _resolve_config_context_safely(path)
+    try:
+        raw = yaml.safe_load(source.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError) as exc:
+        raise DataValidationError(f"cannot load base cycle config {source}: {exc}") from exc
+    payload = _strict_object(raw, _CONFIG_FIELDS, "base cycle config")
+
+    dataset_root = _normalized_contract_root(
+        _text(payload["dataset_root"], "dataset_root"), "dataset_root"
+    )
+    if dataset_root != "datasets":
+        raise DataValidationError("dataset_root must be exactly datasets")
+    output_root = _normalized_contract_root(
+        _text(payload["output_root"], "output_root"), "output_root"
+    )
+    if output_root != "derived/base_cycle":
+        raise DataValidationError("output_root must be exactly derived/base_cycle")
+
+    run_name = _text(payload["run_name"], "run_name")
+    if _RUN_NAME.fullmatch(run_name) is None:
+        raise DataValidationError("run_name is invalid")
+    development_scene_ids = _text_tuple(
+        payload["development_scene_ids"], 2, "two development scene IDs"
+    )
+    holdout_scene_id = _text(payload["holdout_scene_id"], "holdout scene ID")
+    if holdout_scene_id in development_scene_ids:
+        raise DataValidationError("development and holdout scene IDs must not overlap")
+    development_backgrounds = _text_tuple(
+        payload["development_backgrounds"], 2, "development backgrounds"
+    )
+    holdout_background = _text(payload["holdout_background"], "holdout background")
+    if holdout_background in development_backgrounds:
+        raise DataValidationError("development and holdout backgrounds must not overlap")
+
+    return BaseCycleConfig(
+        dataset_root=dataset_root,
+        output_root=output_root,
+        run_name=run_name,
+        real_coco_path=_text(payload["real_coco_path"], "real_coco_path"),
+        development_scene_ids=(development_scene_ids[0], development_scene_ids[1]),
+        holdout_scene_id=holdout_scene_id,
+        development_backgrounds=(
+            development_backgrounds[0],
+            development_backgrounds[1],
+        ),
+        holdout_background=holdout_background,
+        seeds=_seed_tuple(payload["seeds"]),
+    )
+
+
+def _semantic_config(config: BaseCycleConfig) -> dict[str, object]:
+    payload = asdict(config)
+    payload["development_scene_ids"] = list(config.development_scene_ids)
+    payload["development_backgrounds"] = list(config.development_backgrounds)
+    payload["seeds"] = list(config.seeds)
+    return payload
+
+
+def _config_sha256(config: BaseCycleConfig) -> str:
+    serialized = json.dumps(
+        _semantic_config(config),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(serialized).hexdigest()
+
+
+def _assignment_lock(config: BaseCycleConfig) -> dict[str, object]:
+    return {
+        "lock_version": 1,
+        "run_name": config.run_name,
+        "config": _semantic_config(config),
+        "config_sha256": _config_sha256(config),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "state": "integrity_pending",
+    }
+
+
+def _validate_config_paths_lexically(config: BaseCycleConfig) -> None:
+    _assert_cycle_paths_safe_lexically(
+        (
+            config.real_coco_path,
+            *config.development_backgrounds,
+            config.holdout_background,
+        )
+    )
+
+
+def _assert_cycle_paths_safe_lexically(
+    values: tuple[str, ...] | list[str],
+) -> None:
+    for value in values:
+        _reject_evaluation_path(value)
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    try:
+        with path.open("rb") as source:
+            for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                digest.update(chunk)
+    except OSError as exc:
+        raise DataValidationError(f"cannot hash input {path}: {exc}") from exc
+    return digest.hexdigest()
+
+
+def _portable(path: Path, root: Path) -> str:
+    try:
+        return path.relative_to(root).as_posix()
+    except ValueError as exc:
+        raise DataValidationError(f"input is outside dataset root: {path}") from exc
+
+
+def _resolve_repository_root_safely(repository_root: str | Path) -> Path:
+    _reject_evaluation_path(repository_root)
+    lexical = Path(os.path.abspath(os.fspath(repository_root)))
+    _assert_existing_components_are_physical(lexical)
+    if not lexical.exists() or not lexical.is_dir():
+        raise DataValidationError(f"repository root is missing: {lexical}")
+    for sentinel_name in ("pyproject.toml", "AGENTS.md"):
+        sentinel = lexical / sentinel_name
+        if not sentinel.exists() or not sentinel.is_file():
+            raise DataValidationError(
+                f"repository root must contain {sentinel_name}: {lexical}"
+            )
+        if _is_link_or_junction(sentinel):
+            raise DataValidationError(
+                f"repository sentinel must not be a link or junction: {sentinel}"
+            )
+    return lexical.resolve(strict=True)
+
+
+def _resolve_dataset_root_safely(value: str, repository_root: Path) -> Path:
+    if value != "datasets":
+        raise DataValidationError("dataset_root must be exactly datasets")
+    candidate = repository_root / value
+    _assert_existing_components_are_physical(candidate)
+    if not candidate.exists() or not candidate.is_dir():
+        raise DataValidationError(f"dataset root is missing: {candidate}")
+    resolved = candidate.resolve(strict=True)
+    try:
+        resolved.relative_to(repository_root)
+    except ValueError as exc:
+        raise DataValidationError(f"dataset root escaped repository: {candidate}") from exc
+    return resolved
+
+
+def _resolve_configured_input(value: str, root: Path) -> Path:
+    _reject_evaluation_path(value)
+    candidate_value = Path(value)
+    candidate = candidate_value if candidate_value.is_absolute() else root / candidate_value
+    lexical = Path(os.path.abspath(os.fspath(candidate)))
+    _assert_existing_components_are_physical(lexical)
+    if not lexical.exists() or not lexical.is_file():
+        raise DataValidationError(f"configured input is missing: {lexical}")
+    resolved = lexical.resolve(strict=True)
+    try:
+        resolved.relative_to(root)
+    except ValueError as exc:
+        raise DataValidationError(
+            f"configured input must remain inside dataset root: {value}"
+        ) from exc
+    return resolved
+
+
+def _decode_size(path: Path, label: str) -> tuple[int, int]:
+    try:
+        with Image.open(path) as decoded:
+            converted = decoded.convert("RGB")
+            converted.load()
+            width, height = converted.size
+    except (OSError, UnidentifiedImageError, ValueError) as exc:
+        raise DataValidationError(f"cannot decode {label} {path}: {exc}") from exc
+    if width <= 0 or height <= 0:
+        raise DataValidationError(f"{label} must have positive dimensions: {path}")
+    return width, height
+
+
+def _load_and_screen_coco_filenames(coco_path: Path) -> tuple[str, ...]:
+    try:
+        payload = json.loads(coco_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise DataValidationError(f"cannot load COCO annotation {coco_path}: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise DataValidationError("COCO root must be an object")
+    images = payload.get("images")
+    if not isinstance(images, list) or not all(isinstance(item, dict) for item in images):
+        raise DataValidationError("COCO images must be a list of objects")
+
+    filenames: list[str] = []
+    for index, item in enumerate(images):
+        file_name = item.get("file_name")
+        if not isinstance(file_name, str) or not file_name:
+            raise DataValidationError(
+                f"COCO images[{index}].file_name must be a non-empty string"
+            )
+        _reject_evaluation_path(file_name)
+        if (
+            file_name in {".", ".."}
+            or "/" in file_name
+            or "\\" in file_name
+            or Path(file_name).is_absolute()
+            or PureWindowsPath(file_name).is_absolute()
+            or Path(file_name).name != file_name
+        ):
+            raise DataValidationError(
+                f"COCO image file_name must be a plain basename: {file_name}"
+            )
+        filenames.append(file_name)
+    if len(filenames) != len(set(filenames)):
+        raise DataValidationError("COCO image file_name values must be unique")
+    _assert_cycle_paths_safe_lexically(filenames)
+    return tuple(filenames)
+
+
+def _scene_inventory(
+    coco_path: Path,
+    development_ids: tuple[str, str],
+    holdout_id: str,
+    root: Path,
+    *,
+    filenames: tuple[str, ...] | None = None,
+) -> list[dict[str, object]]:
+    screened = (
+        _load_and_screen_coco_filenames(coco_path)
+        if filenames is None
+        else filenames
+    )
+    declared_ids = {*development_ids, holdout_id}
+    grouped: dict[str, set[str]] = {}
+    parsed: list[tuple[str, str, str]] = []
+    for file_name in screened:
+        match = SCENE_PATTERN.fullmatch(file_name)
+        if match is None:
+            raise DataValidationError(
+                f"COCO scene filename is invalid: {file_name}"
+            )
+        scene_id = match.group("scene_id")
+        difficulty = match.group("difficulty")
+        difficulties = grouped.setdefault(scene_id, set())
+        if difficulty in difficulties:
+            raise DataValidationError(
+                f"scene {scene_id} must contain each e/m/h difficulty exactly once"
+            )
+        difficulties.add(difficulty)
+        parsed.append((scene_id, difficulty, file_name))
+    if set(grouped) != declared_ids:
+        raise DataValidationError(
+            "declared scene IDs must exactly partition all COCO scene groups"
+        )
+    if any(difficulties != {"e", "m", "h"} for difficulties in grouped.values()):
+        raise DataValidationError("each declared scene group must contain exactly e/m/h")
+
+    records: list[dict[str, object]] = []
+    relative_parent = coco_path.parent.relative_to(root)
+    for scene_id, difficulty, file_name in sorted(parsed, key=lambda item: item[2]):
+        image_path = _resolve_configured_input(
+            (relative_parent / file_name).as_posix(), root
+        )
+        width, height = _decode_size(image_path, "scene image")
+        records.append(
+            {
+                "scene_id": scene_id,
+                "difficulty": difficulty,
+                "split": (
+                    "development"
+                    if scene_id in development_ids
+                    else "cycle_holdout"
+                ),
+                "path": _portable(image_path, root),
+                "sha256": _sha256(image_path),
+                "width": width,
+                "height": height,
+            }
+        )
+    return records
+
+
+def _background_inventory(
+    development: tuple[str, str],
+    holdout: str,
+    root: Path,
+) -> list[dict[str, object]]:
+    assignments = [
+        *((value, "development") for value in development),
+        (holdout, "cycle_holdout"),
+    ]
+    records: list[dict[str, object]] = []
+    for value, split in assignments:
+        path = _resolve_configured_input(value, root)
+        _decode_size(path, "background")
+        records.append(
+            {
+                "split": split,
+                "path": _portable(path, root),
+                "sha256": _sha256(path),
+            }
+        )
+    return sorted(records, key=lambda record: str(record["path"]))
+
+
+def _validate_utc_timestamp(value: object, label: str) -> None:
+    if not isinstance(value, str):
+        raise DataValidationError(f"{label} must be a UTC ISO-8601 timestamp")
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise DataValidationError(f"{label} must be a UTC ISO-8601 timestamp") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() != timezone.utc.utcoffset(parsed):
+        raise DataValidationError(f"{label} must be a UTC ISO-8601 timestamp")
+
+
+def _validate_assignment_lock(
+    lock_path: str | Path, config: BaseCycleConfig
+) -> None:
+    lexical = Path(os.path.abspath(os.fspath(lock_path)))
+    _reject_evaluation_path(lexical)
+    _assert_existing_components_are_physical(lexical)
+    if not lexical.exists() or not lexical.is_file():
+        raise DataValidationError(f"assignment lock is missing: {lexical}")
+    if lexical.name != "assignment.lock.json" or lexical.parent.name != config.run_name:
+        raise DataValidationError("assignment lock path does not match run_name")
+    try:
+        raw = json.loads(lexical.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise DataValidationError(f"cannot load assignment lock: {exc}") from exc
+    payload = _strict_object(
+        raw,
+        {
+            "lock_version",
+            "run_name",
+            "config",
+            "config_sha256",
+            "created_at",
+            "state",
+        },
+        "assignment lock",
+    )
+    _validate_utc_timestamp(payload["created_at"], "assignment lock created_at")
+    expected = _semantic_config(config)
+    if (
+        payload["lock_version"] != 1
+        or payload["run_name"] != config.run_name
+        or payload["config"] != expected
+        or payload["config_sha256"] != _config_sha256(config)
+        or payload["state"] != "integrity_pending"
+    ):
+        raise DataValidationError("assignment lock does not match the Base cycle config")
+
+
+def _prepare_inventory(
+    config_path: str | Path,
+    config: BaseCycleConfig,
+    lock_path: str | Path,
+) -> tuple[Path, dict[str, object]]:
+    _validate_assignment_lock(lock_path, config)
+    source, repository_root = _resolve_config_context_safely(config_path)
+    current_config = load_base_cycle_config(source)
+    if current_config != config:
+        raise DataValidationError("base cycle config changed after assignment lock")
+    root = _resolve_dataset_root_safely(config.dataset_root, repository_root)
+
+    _validate_config_paths_lexically(config)
+    coco_path = _resolve_configured_input(config.real_coco_path, root)
+    filenames = _load_and_screen_coco_filenames(coco_path)
+
+    registry_path = _resolve_configured_input("class_registry.json", root)
+    registry = load_class_registry(registry_path)
+    base_indices = tuple(
+        record.model_index for record in registry.classes if record.phase == "base"
+    )
+    if base_indices != tuple(range(15)):
+        raise DataValidationError("Base model_index values must be exactly 0 through 14")
+    validate_coco(coco_path, registry, "base")
+
+    scenes = _scene_inventory(
+        coco_path,
+        config.development_scene_ids,
+        config.holdout_scene_id,
+        root,
+        filenames=filenames,
+    )
+    backgrounds = _background_inventory(
+        config.development_backgrounds,
+        config.holdout_background,
+        root,
+    )
+    inventory: dict[str, object] = {
+        "config": _semantic_config(config),
+        "config_sha256": _config_sha256(config),
+        "registry": {
+            "path": _portable(registry_path, root),
+            "sha256": _sha256(registry_path),
+        },
+        "real_coco": {
+            "path": _portable(coco_path, root),
+            "sha256": _sha256(coco_path),
+        },
+        "scenes": scenes,
+        "backgrounds": backgrounds,
+        "seeds": list(config.seeds),
+    }
+    return root, inventory
