@@ -1,0 +1,15 @@
+dataset_root: datasets
+output_root: runs/detector_ensemble/base_v2
+run_name: yolo26s_s42_s44_val0509
+members:
+  - config_path: configs/detector_cycle/yolo26s_s42_val0509_selected.yaml
+    config_sha256: 9960b18cc607c6dc55dfc0b4cf6722571bbe0b28395fab972ff98d5c85255ccc
+    checkpoint_path: runs/detector_cycle/base_v2/yolo26s_s42_val0509/checkpoints/best.pt
+    checkpoint_sha256: b11b56600f6920e9015c31d0fe48af91f7773369cecb3d8c15d3338409b880f6
+  - config_path: configs/detector_cycle/yolo26s_s44_val0509_selected.yaml
+    config_sha256: 9d584b7a0f8011deb130240a0b2787c79e153fe8b0c6a0ad2147efaf7d5d1f75
+    checkpoint_path: runs/detector_cycle/base_v2/yolo26s_s44_val0509/checkpoints/best.pt
+    checkpoint_sha256: b97feb4fa0a5df6798ccff90e39f5e79a9478b263b7a2bfcdd9fb533db4acb85
+cpu_threads: 8
+cpu_warmups: 1
+cpu_repetitions: 3

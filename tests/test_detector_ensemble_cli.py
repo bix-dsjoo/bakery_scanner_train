@@ -1,0 +1,162 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+from bakery_scanner import detector_ensemble_cli
+from bakery_scanner.detector_ensemble import (
+    DetectorEnsembleConfig,
+    DetectorEnsembleMember,
+    DetectorEnsembleReport,
+)
+
+
+def _config(tmp_path: Path) -> DetectorEnsembleConfig:
+    (tmp_path / "datasets").mkdir()
+    (tmp_path / "configs" / "detector_ensemble").mkdir(parents=True)
+    (tmp_path / "pyproject.toml").write_text("[project]\nname='fixture'\n", encoding="utf-8")
+    return DetectorEnsembleConfig(
+        dataset_root=str(tmp_path / "datasets"),
+        output_root=str(tmp_path / "runs"),
+        run_name="ensemble",
+        members=(
+            DetectorEnsembleMember("first.yaml", "a" * 64, "first.pt", "b" * 64),
+            DetectorEnsembleMember("second.yaml", "c" * 64, "second.pt", "d" * 64),
+        ),
+        cpu_threads=8,
+        cpu_warmups=1,
+        cpu_repetitions=3,
+        source_path=tmp_path / "configs" / "detector_ensemble" / "ensemble.yaml",
+    )
+
+
+def _report(tmp_path: Path) -> DetectorEnsembleReport:
+    output = tmp_path / "runs" / "ensemble"
+    output.mkdir(parents=True)
+    metadata = output / "metadata.json"
+    predictions = output / "predictions.json"
+    metrics = output / "metrics.json"
+    metadata.write_text("{}\n", encoding="utf-8")
+    predictions.write_text("{}\n", encoding="utf-8")
+    metrics.write_text(
+        json.dumps(
+            {
+                "metrics": {
+                    "global": {
+                        "ground_truth_count": 30,
+                        "true_positive_count": 30,
+                        "false_positive_count": 0,
+                        "recall": 1.0,
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    return DetectorEnsembleReport(output, metadata, predictions, metrics)
+
+
+def test_ensemble_evaluate_cli_emits_json(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    config = _config(tmp_path)
+    report = _report(tmp_path)
+    monkeypatch.setattr(
+        detector_ensemble_cli, "load_detector_ensemble_config", lambda path: config
+    )
+    monkeypatch.setattr(
+        detector_ensemble_cli, "evaluate_detector_ensemble", lambda value: report
+    )
+
+    exit_code = detector_ensemble_cli.main(
+        ["evaluate", "--config", "ensemble.yaml", "--json"]
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert payload["metrics"]["global"]["recall"] == 1.0
+    assert payload["metrics"]["global"]["false_positive_count"] == 0
+
+
+def test_ensemble_benchmark_cli_emits_json(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    config = _config(tmp_path)
+    benchmark = tmp_path / "benchmark.json"
+    benchmark.write_text(
+        json.dumps({"timing": {"count": 18, "p95_ms": 249.0}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        detector_ensemble_cli, "load_detector_ensemble_config", lambda path: config
+    )
+    monkeypatch.setattr(
+        detector_ensemble_cli,
+        "benchmark_detector_ensemble_cpu",
+        lambda value: benchmark,
+    )
+
+    exit_code = detector_ensemble_cli.main(
+        ["benchmark", "--config", "ensemble.yaml", "--json"]
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert payload["benchmark"]["timing"]["count"] == 18
+    assert payload["benchmark_path"] == str(benchmark)
+
+
+def test_ensemble_cli_prints_validation_split(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    config = _config(tmp_path)
+    report = _report(tmp_path)
+    monkeypatch.setattr(
+        detector_ensemble_cli, "load_detector_ensemble_config", lambda path: config
+    )
+    monkeypatch.setattr(
+        detector_ensemble_cli, "evaluate_detector_ensemble", lambda value: report
+    )
+
+    exit_code = detector_ensemble_cli.main(["evaluate", "--config", "ensemble.yaml"])
+
+    output = capsys.readouterr().out
+    assert exit_code == 0
+    assert "Split: validation" in output
+
+
+def test_ensemble_cli_resolves_display_paths_from_config_repository(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    config = _config(tmp_path)
+    config = DetectorEnsembleConfig(
+        dataset_root="datasets",
+        output_root="runs/detector_ensemble",
+        run_name=config.run_name,
+        members=config.members,
+        cpu_threads=config.cpu_threads,
+        cpu_warmups=config.cpu_warmups,
+        cpu_repetitions=config.cpu_repetitions,
+        source_path=config.source_path,
+    )
+    report = _report(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    monkeypatch.chdir(outside)
+    monkeypatch.setattr(
+        detector_ensemble_cli, "load_detector_ensemble_config", lambda path: config
+    )
+    monkeypatch.setattr(
+        detector_ensemble_cli, "evaluate_detector_ensemble", lambda value: report
+    )
+
+    exit_code = detector_ensemble_cli.main(["evaluate", "--config", "ensemble.yaml"])
+
+    output = capsys.readouterr().out
+    assert exit_code == 0
+    assert f"Dataset root: {(tmp_path / 'datasets').resolve()}" in output
+    assert f"Member 0 config: {(tmp_path / 'first.yaml').resolve()}" in output
+    assert (
+        f"Output: {(tmp_path / 'runs' / 'detector_ensemble' / 'ensemble').resolve()}"
+        in output
+    )
