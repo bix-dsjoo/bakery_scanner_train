@@ -80,7 +80,7 @@ Each scene record has exactly `scene_id`, `difficulty`, `split`, `path`, `sha256
 - Create: `tests/test_base_cycle.py`
 
 **Interfaces:**
-- Consumes: `validate_coco(path, registry, "base")`, `load_class_registry(path)`, `assert_training_paths_safe(paths, dataset_root)`, `SCENE_PATTERN`.
+- Consumes: `validate_coco(path, registry, "base")`, `load_class_registry(path)`, and `SCENE_PATTERN`; it deliberately does not call the existing `assert_training_paths_safe`, because that helper resolves both evaluation directories even for a safe input.
 - Produces: `BaseCycleConfig`, `BaseCycleReport`, `load_base_cycle_config()` and the internal `_prepare_inventory()` used by Tasks 2 and 3.
 
 - [ ] **Step 1: Write strict config-loader tests**
@@ -243,7 +243,6 @@ from PIL import Image, UnidentifiedImageError
 from .coco import validate_coco
 from .errors import DataValidationError
 from .registry import load_class_registry
-from .safety import assert_training_paths_safe
 from .splits import SCENE_PATTERN
 
 CYCLE_VERSION = "1.0.0"
@@ -460,6 +459,7 @@ Implement private helpers `_sha256(path)`, `_portable(path, root)`,
 `_resolve_repository_root_safely(repository_root)`,
 `_resolve_configured_input(value, root)`, `_decode_size(path, label)`,
 `_load_and_screen_coco_filenames(coco_path)`,
+`_assert_cycle_paths_safe_lexically(values)`,
 `_scene_inventory(coco_path, development_ids, holdout_id, root)`,
 `_background_inventory(development, holdout, root)`,
 `_validate_assignment_lock(lock_path, config)`, and
@@ -480,7 +480,9 @@ the final helper returns `tuple[Path, dict[str, object]]`.
 4. lexically reject any normalized configured path or COCO image filename containing
    `base/test` or
    `incremental/test` before `resolve`, `stat`, directory listing, open, or decode;
-5. call `assert_training_paths_safe` on COCO and all backgrounds before any input read;
+5. call the new pure `_assert_cycle_paths_safe_lexically` on COCO, every background,
+   and every screened COCO filename; it operates on normalized path parts only and must
+   not call `resolve`, `stat`, `lstat`, listing, open, or decode;
 6. require every resolved input to remain inside the resolved dataset root and reject
    symlink/junction escapes;
 7. read the already-approved COCO JSON once, require every `images[*].file_name` to be
@@ -546,6 +548,25 @@ def test_freeze_publishes_lock_before_holdout_byte_access(
 
     monkeypatch.setattr(base_cycle, "_sha256", guarded_sha256)
     freeze_base_cycle(config_path)
+
+
+def test_successful_freeze_never_touches_evaluation_subtrees(
+    cycle_fixture, monkeypatch
+) -> None:
+    _, config_path = cycle_fixture
+    touched: list[str] = []
+    _install_evaluation_access_guards(
+        monkeypatch,
+        touched,
+        methods=(
+            Path.resolve, Path.stat, Path.lstat, Path.iterdir, Path.open, Image.open,
+        ),
+    )
+
+    report = freeze_base_cycle(config_path)
+
+    assert report.manifest_path.exists()
+    assert touched == []
 
 
 def test_freeze_publishes_hash_bound_manifest_atomically(cycle_fixture) -> None:
@@ -677,6 +698,12 @@ def test_validate_rejects_test_repository_argument_before_resolve(
     assert touched == []
 ```
 
+`_install_evaluation_access_guards` wraps each real method and delegates for every safe
+path. If an argument's normalized lexical parts contain `datasets/base/test` or
+`datasets/incremental/test`, it appends the operation name and raises `AssertionError`.
+This makes a successful freeze fail if any legacy helper merely resolves or stats an
+evaluation directory, even when no evaluation file is opened.
+
 - [ ] **Step 2: Run publication tests and verify red**
 
 Run:
@@ -775,6 +802,10 @@ mutates `manifest.json`, and calls `validate_base_cycle(root.parent, "base_v2")`
         ("background_split_overlap", "overlap"),
         ("wrong_scene_count", "count"),
         ("wrong_background_count", "count"),
+        ("swap_background_assignments", "assignment"),
+        ("scene_id_path_remap", "assignment"),
+        ("real_coco_authority_mismatch", "assignment"),
+        ("registry_authority_mismatch", "assignment"),
         ("path_traversal", "path"),
         ("config_hash_mismatch", "config_sha256"),
         ("config_payload_mismatch", "config"),
@@ -829,12 +860,51 @@ def test_validate_rejects_link_escape(cycle_fixture, case: str) -> None:
         validate_base_cycle(root.parent, "base_v2")
 
 
+@pytest.mark.parametrize(
+    ("artifact", "link_kind"),
+    [
+        ("run_dir", "symlink"),
+        ("run_dir", "junction"),
+        ("assignment.lock.json", "symlink"),
+        ("manifest.json", "symlink"),
+    ],
+)
+def test_validate_rejects_linked_output_artifact(
+    cycle_fixture, tmp_path, artifact: str, link_kind: str
+) -> None:
+    root, config_path = cycle_fixture
+    run = freeze_base_cycle(config_path).output_dir
+    _replace_output_artifact_with_external_link(run, tmp_path, artifact, link_kind)
+
+    with pytest.raises(DataValidationError, match="output artifact.*link|junction"):
+        validate_base_cycle(root.parent, "base_v2")
+
+
 def test_validate_rejects_missing_source(cycle_fixture) -> None:
     root, config_path = cycle_fixture
     freeze_base_cycle(config_path)
     (root / "base/val/scene_e_0503.jpg").unlink()
     with pytest.raises(DataValidationError, match="missing"):
         validate_base_cycle(root.parent, "base_v2")
+
+
+def test_validate_screens_coco_before_listing_or_decode(
+    cycle_fixture, monkeypatch
+) -> None:
+    root, config_path = cycle_fixture
+    run = freeze_base_cycle(config_path).output_dir
+    coco = root / "base/val/instances_val.json"
+    _inject_coco_image_filename(root, "base/test/forbidden.jpg")
+    manifest_path = run / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["real_coco"]["sha256"] = _sha256(coco)
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    touched: list[str] = []
+    _install_listing_and_decode_guards(monkeypatch, touched)
+
+    with pytest.raises(DataValidationError, match="evaluation-only"):
+        validate_base_cycle(root.parent, "base_v2")
+    assert touched == []
 
 
 def test_relocated_completed_run_validates_with_same_config_hash(
@@ -852,8 +922,10 @@ def test_relocated_completed_run_validates_with_same_config_hash(
 ```
 
 The mutation helper itself is table-tested so each case changes exactly the intended
-field. Run all tests above and confirm they fail for the intended reason before writing
-the validator.
+field. Assignment mutations swap complete valid records or point to fixture decoys with
+matching SHA values, so counts, split vocabulary, and ordinary hash validation still pass;
+only lock/config authority can reject them. Run all tests above and confirm they fail for
+the intended reason before writing the validator.
 
 - [ ] **Step 5: Implement strict independent validation**
 
@@ -869,9 +941,7 @@ def validate_base_cycle(
     if not _RUN_NAME.fullmatch(run_name):
         raise DataValidationError("run_name is invalid")
     output_root = _resolve_cycle_output_root_safely(root, create=False)
-    run_dir = output_root / run_name
-    if run_dir.parent != output_root:
-        raise DataValidationError("run_name must select a direct cycle directory")
+    run_dir = _resolve_run_dir_safely(output_root, run_name)
     return _validate_run_dir(root, run_dir)
 ```
 
@@ -881,15 +951,30 @@ than 1/`1.0.0`, non-UTC or invalid `created_at`, duplicate paths, wrong split na
 missing e/m/h variants, scene/background overlap across splits, wrong counts, path
 traversal, symlink/junction escapes, missing files, and SHA drift. It reruns registry and
 COCO validation and reconstructs `BaseCycleReport` only from validated manifest data.
+Immediately before every replay call to `validate_coco`, `_validate_run_dir` must call
+`_load_and_screen_coco_filenames` on the hash-verified COCO and reject unsafe basenames;
+no directory listing or image decode may occur between screening and `validate_coco`.
 The lock must have `lock_version == 1` and `state == "integrity_pending"`; manifest seeds
 must exactly match both lock/config seeds and the checked-in `[42, 43, 44]`. Every SHA-256
 field is exactly 64 lowercase hexadecimal characters before any hash comparison.
+From the validated lock/config, reconstruct the only authorized registry path
+(`class_registry.json`), COCO path, development/holdout background path-to-split mapping,
+and scene ID-to-split mapping. From the screened COCO basenames, reconstruct the exact
+scene ID/difficulty/path tuples. Manifest `registry`, `real_coco`, `backgrounds`, and
+`scenes` must equal those authoritative records field-for-field (apart from their
+independently verified hashes/dimensions); matching counts alone is never sufficient.
 Neither the public API nor the CLI accepts an alternate output root.
 `_resolve_repository_root_safely` lexically rejects an evaluation-subtree argument before
 `resolve` or any other filesystem call, converts a safe argument to an absolute path
 without following links, rejects a symlink/junction root, requires `pyproject.toml` and
 `AGENTS.md`, then derives the sole dataset and output roots. The test above proves the
 early rejection by making `Path.resolve` observable.
+`_resolve_run_dir_safely` requires the run to be a physical direct child directory, uses
+`lstat`/Windows reparse attributes to reject a symlink or junction before resolution, and
+proves physical containment. `_load_json_object` similarly requires
+`assignment.lock.json` and `manifest.json` to be regular non-link files inside that
+physical run directory before reading either one. The linked-artifact tests cover the run
+directory, lock file, and manifest file paths.
 
 - [ ] **Step 6: Run the focused and full foundation tests**
 

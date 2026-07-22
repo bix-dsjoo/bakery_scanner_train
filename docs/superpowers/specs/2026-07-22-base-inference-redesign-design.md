@@ -305,6 +305,8 @@ lock과 config는 재사용하거나 덮어쓰지 않는다. 이미 관측된 te
   end-to-end 평균/P50/P95, warm-up 제외 횟수와 측정 반복 횟수
 - benchmark context: CPU 모델, thread 수, 각 모델 입력 크기, 장면당 후보 batch 크기,
   ONNX Runtime provider와 detector miss rate
+- runtime provenance: Python, PyTorch, torchvision, Ultralytics, ONNX Runtime, NumPy,
+  Pillow/OpenCV 등 실제 추론 경로 dependency 버전과 OS/architecture
 
 ### 8.2 Cycle holdout 합격
 
