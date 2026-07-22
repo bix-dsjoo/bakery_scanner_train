@@ -1,0 +1,16 @@
+dataset_root: datasets
+output_root: derived/base_cycle
+run_name: base_v2
+real_coco_path: base/val/instances_val.json
+development_scene_ids:
+  - "0503"
+  - "0509"
+holdout_scene_id: "0510"
+development_backgrounds:
+  - collected/backgrounds/tray_white_square.png
+  - collected/backgrounds/tray_wood_black_surface.png
+holdout_background: collected/backgrounds/tray_wood_white_surface.png
+seeds:
+  - 42
+  - 43
+  - 44

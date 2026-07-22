@@ -29,6 +29,7 @@ bakery-classifier = "bakery_scanner.classifier_train_cli:main"
 bakery-e2e = "bakery_scanner.e2e_cli:main"
 bakery-benchmark = "bakery_scanner.cpu_benchmark_cli:main"
 bakery-final-eval = "bakery_scanner.final_evaluation_cli:main"
+bakery-base-cycle = "bakery_scanner.base_cycle_cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
