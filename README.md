@@ -374,6 +374,17 @@ bakery-detector evaluate `
   --checkpoint runs/detector/yolo11n_base_seed42/checkpoints/best.pt
 ```
 
+### Base detector 후보 앙상블
+
+동결된 두 YOLO26s checkpoint의 후보 합집합은 개발용 2-fold에서만 평가하고 CPU benchmark를 별도로 기록합니다. 아래 명령은 `datasets/base/test`, `datasets/incremental/test`와 Base cycle holdout을 사용하지 않습니다.
+
+```powershell
+bakery-detector-ensemble evaluate --config configs/detector_ensemble/yolo26s_s42_s44_val0503.yaml
+bakery-detector-ensemble benchmark --config configs/detector_ensemble/yolo26s_s42_s44_val0503.yaml
+```
+
+`evaluate`는 member config/checkpoint SHA-256과 validation sample 일치를 검증한 뒤 후보를 병합합니다. `benchmark`는 완료된 평가 구성만 CPU에서 실행하며 warm-up을 제외한 평균, P50, P95를 기록합니다. 이 수치는 현재 개발 PC 기준이며 특정 POS 장치 성능을 의미하지 않습니다.
+
 두 subcommand 모두 `--json`을 지원합니다. 이 결과는 3장의 실제 validation 장면에 대한 최초 재현 가능한 train-side 기준선이며 test 성능이나 특정 POS 장치의 성능을 의미하지 않습니다. Test 평가는 기준 설정을 고정한 뒤 별도 단계에서만 수행합니다.
 
 ### Artifact 경로 이동
